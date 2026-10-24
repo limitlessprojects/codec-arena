@@ -1,0 +1,11 @@
+{
+  "lambda": 14.0,
+  "mu_dec": 0.05,
+  "nu_enc": 0.02,
+  "dec_free": 8.0,
+  "enc_free_s": 1.0,
+  "sigma0": 0.22,
+  "sigma_decay": 0.93,
+  "jump_p": 0.02,
+  "rd_multipliers": [0.55, 0.7, 0.85, 1.0, 1.2, 1.45, 1.75]
+}

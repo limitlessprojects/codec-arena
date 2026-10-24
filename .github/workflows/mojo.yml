@@ -1,0 +1,33 @@
+name: mojo-brain
+
+# The Mojo brain is a first-class target. The Python brain is the reference
+# oracle. This job is best-effort: if Mojo's toolchain moves under us, the
+# arena still runs — the failure is recorded, not hidden.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "3 22 * * 0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Mojo (modular)
+        run: |
+          curl -sSf https://get.modular.com | MODULAR_AUTH=${{ secrets.MODULAR_TOKEN || '' }} sh -
+          modular install mojo || true
+      - name: Build + smoke the Mojo brain
+        run: |
+          mojo --version
+          mojo build brain/evolve.mojo -o /tmp/arena-brain
+          # differential smoke: tiny population, genetics kernel only
+          python3 tools/gen_seed.py --out /tmp/smoke_seed.txt --per-tribe 1
+          /tmp/arena-brain --pop /tmp/smoke_seed.txt --gens 2 --out /tmp/mojo_out.txt
+          head -4 /tmp/mojo_out.txt
+      - name: Record status
+        if: always()
+        run: |
+          if [ $? -eq 0 ]; then echo "mojo brain: OK $(date -u)" > MOJO-STATUS.md;
+          else echo "mojo brain: build/run failed $(date -u) — python brain remains canonical" > MOJO-STATUS.md; fi

@@ -1,0 +1,151 @@
+name: arena
+
+on:
+  workflow_dispatch:
+    inputs:
+      gens:
+        description: "generations per shard"
+        default: "20"
+      pop:
+        description: "population per shard"
+        default: "256"
+      shards:
+        description: "number of parallel shards (max 20)"
+        default: "20"
+  schedule:
+    - cron: "37 21 * * *"
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: arena-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.calc.outputs.shards }}
+      gens: ${{ steps.calc.outputs.gens }}
+      pop: ${{ steps.calc.outputs.pop }}
+    steps:
+      - id: calc
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            N=${{ inputs.shards }}; G=${{ inputs.gens }}; P=${{ inputs.pop }}
+          else
+            N=20; G=20; P=256
+          fi
+          echo "shards=[$(seq -s, 0 $((N-1)))]" >> "$GITHUB_OUTPUT"
+          echo "gens=$G"   >> "$GITHUB_OUTPUT"
+          echo "pop=$P"    >> "$GITHUB_OUTPUT"
+
+  evolve:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 20
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - name: Build arena (ReleaseFast)
+        run: zig build -Doptimize=ReleaseFast
+      - name: Generate deterministic corpus
+        run: python3 tools/gen_corpus.py --out corpus/raw
+      - name: Seed anchor target if absent
+        run: |
+          if [ ! -f benchmarks/baseline.json ]; then
+            mkdir -p benchmarks
+            echo '{"target_psnr": 35.4, "note": "seed anchor; anchor job refines"}' > benchmarks/baseline.json
+          fi
+      - name: Evolve shard ${{ matrix.shard }}
+        run: |
+          mkdir -p out
+          python3 brain/evolve.py \
+            --shard ${{ matrix.shard }} \
+            --gens ${{ needs.plan.outputs.gens }} \
+            --pop ${{ needs.plan.outputs.pop }} \
+            --elite 8 --seed ${{ github.run_id }} \
+            --zig zig-out/bin/arena --corpus corpus/raw \
+            --out-dir out/shard-${{ matrix.shard }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: out/shard-${{ matrix.shard }}/
+
+  anchor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - run: zig build -Doptimize=ReleaseFast
+      - run: python3 tools/gen_corpus.py --out corpus/raw
+      - name: Benchmark real codecs (x264/x265/SVT-AV1/libaom)
+        run: python3 tools/anchor.py --out out_baseline.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: baseline
+          path: out_baseline.json
+
+  merge:
+    needs: [evolve, anchor]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Stage artifacts
+        run: |
+          mkdir -p stage
+          for d in artifacts/shard-*; do
+            s=$(basename "$d" | sed 's/shard-//')
+            mkdir -p "stage/shard-$s"
+            cp "$d"/* "stage/shard-$s/" 2>/dev/null || true
+          done
+          cp artifacts/baseline/out_baseline.json stage/baseline.json 2>/dev/null || true
+          ls stage | head
+      - name: Merge + report
+        id: merge
+        run: |
+          python3 tools/merge_results.py --in-dir stage
+          echo "evals=$(python3 -c "import json;print(json.load(open('state/lifetime_evals.json'))['lifetime_evals'])")" >> "$GITHUB_OUTPUT"
+      - name: Commit state
+        run: |
+          git config user.name "codec-arena-bot"
+          git config user.email "arena@limitlessprojects.dev"
+          git add LEADERBOARD.md LESSONS.md state/ halloffame/ benchmarks/ 2>/dev/null || true
+          git commit -m "arena: run ${{ github.run_id }} — lifetime evals ${{ steps.merge.outputs.evals }} [skip ci]" || echo "nothing to commit"
+          git push
+      - name: Nightly issue report
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "## Arena Report — run ${{ github.run_id }}"
+            echo ""
+            echo "Lifetime evaluations: **${{ steps.merge.outputs.evals }}**"
+            echo ""
+            echo '```'
+            tail -40 LEADERBOARD.md
+            echo '```'
+            echo ""
+            echo "Latest lessons:"
+            echo '```'
+            tail -20 LESSONS.md 2>/dev/null || echo "(none yet)"
+            echo '```'
+          } > report.md
+          gh issue create --title "Arena Report — run ${{ github.run_id }}" \
+             --body-file report.md --label arena-report || true

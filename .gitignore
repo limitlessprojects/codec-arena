@@ -1,0 +1,7 @@
+zig-out/
+.zig-cache/
+corpus/raw/
+out/
+results.csv
+__pycache__/
+*.pyc
