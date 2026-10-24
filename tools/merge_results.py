@@ -116,7 +116,8 @@ def main():
             lb.append(f"Champion vs the x264 bar ({base['target_psnr']} dB): "
                       f"champion {m['psnr']:.2f} dB @ {m['bpp']:.4f} bpp — "
                       f"quality gap {base['target_psnr'] - m['psnr']:.1f} dB, "
-                      f"bits gap {m['bpp']:.4f} vs 0.161 (x264 qp40 point).", "")
+                      f"bits gap {m['bpp']:.4f} vs 0.161 (x264 qp40 point).")
+            lb.append("")
     with open(os.path.join(repo, "LEADERBOARD.md"), "w") as f:
         f.write("\n".join(lb))
 
