@@ -123,7 +123,9 @@ def main():
     if x264:
         results["target_psnr"] = min(x264, key=lambda p: abs(p["psnr"] - 34.0))["psnr"]
 
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    out_dir = os.path.dirname(args.out)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     with open(args.out, "w") as f:
         json.dump(results, f, indent=1)
     print("target_psnr:", results["target_psnr"])
