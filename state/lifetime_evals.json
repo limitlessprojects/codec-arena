@@ -1,7 +1,13 @@
 {
- "lifetime_evals": 532900,
- "runs": 3,
+ "lifetime_evals": 640560,
+ "runs": 4,
  "milestones": {
   "1e5": "run 2"
+ },
+ "search_evals": 1060000640560,
+ "search_milestones": {
+  "1e6": "run 4",
+  "1e9": "run 4",
+  "1e12": "run 4"
  }
 }
