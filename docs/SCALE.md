@@ -38,16 +38,20 @@ run 40136759247 pop 256 gens 20), quadratic ridge α=10,
 Spearman ρ=0.70, R²=0.95 on held-out data. Per-island ridge refits toward the
 prior every 4 generations adapt it to each shard's corner of the landscape.
 
-## The nightly (v0.2)
+## The cadence (v0.2.1)
 
 - 20 shards × 20 gens × 256 pop oracle evals = **102,400 oracle evals/run**.
 - 20 shards × 20 gens × 2.65e9 screens = **1.06e12 candidate evals/run**.
-- So: **+1 trillion search evals every single night**, ~100K of them
-  promoted-and-oracle-verified, for $0.
+- The arena runs **six times a day** (crons at 01:37/05:37/09:37/13:37/17:37/21:37
+  UTC) plus an hourly heartbeat that re-dispatches any run GitHub dropped
+  (observed: the 2026-10-25 21:37 cron never fired). So: **+6.4 trillion
+  search evals every single day**, ~600K of them promoted-and-oracle-verified,
+  for $0. The heartbeat costs ~24 runner-minutes a day; the shards pay for
+  themselves in evals.
 
 ## Paths beyond 1e12
 
-1. **More screens** (free): the screen dial is the multiplier. 1e13/night =
+1. **More screens** (free): the screen dial is the multiplier. 1e13 per run =
    2.65e10 screens/gen ≈ 3–5 min more per generation. Memory stays flat
    (streaming top-K). The wall is job time, not dollars.
 2. **Spore swarm (community)**: anyone runs a shard on their own metal and

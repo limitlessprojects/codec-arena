@@ -16,7 +16,10 @@ on:
         description: "surrogate screens per generation (0 = legacy GA path)"
         default: "2650000000"
   schedule:
-    - cron: "37 21 * * *"
+    # Six arena runs per day, 4h apart, off-peak minute (:37 — GitHub delays
+    # top-of-hour crons hardest). The heartbeat workflow is the catch-up net:
+    # if GitHub drops one of these crons, the missed run is dispatched late.
+    - cron: "37 1,5,9,13,17,21 * * *"
 
 permissions:
   contents: write
@@ -140,21 +143,38 @@ jobs:
           python3 tools/merge_results.py --in-dir stage
           echo "evals=$(python3 -c "import json;print(json.load(open('state/lifetime_evals.json'))['lifetime_evals'])")" >> "$GITHUB_OUTPUT"
           echo "search=$(python3 -c "import json;print(json.load(open('state/lifetime_evals.json'))['search_evals'])")" >> "$GITHUB_OUTPUT"
-      - name: Commit state
+      - name: Commit state (race-safe push)
         run: |
           git config user.name "codec-arena-bot"
           git config user.email "arena@limitlessprojects.dev"
           git add LEADERBOARD.md LESSONS.md state/ halloffame/ benchmarks/ 2>/dev/null || true
           git commit -m "arena: run ${{ github.run_id }} — oracle ${{ steps.merge.outputs.evals }}, search ${{ steps.merge.outputs.search }} [skip ci]" || echo "nothing to commit"
-          git pull --rebase origin main || true
-          git push
-      - name: Nightly issue report
+          ok=""
+          for i in 1 2 3 4 5 6; do
+            if git pull --rebase origin main && git push; then ok=1; break; fi
+            echo "attempt $i lost the push race; backing off"
+            sleep $((10 + i * 10))
+          done
+          if [ -z "$ok" ]; then
+            echo "FATAL: state push failed after 6 attempts — counters would be lost"
+            git status -sb
+            exit 1
+          fi
+      - name: Champion report (issue only when a new global champion is crowned)
         if: github.event_name == 'schedule'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          new_id=$(python3 -c "import json;print(json.load(open('halloffame/champion.json'))['id'])" 2>/dev/null || echo "")
+          prev_id=$(git show origin/main:halloffame/champion.json 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])" 2>/dev/null || echo "")
+          echo "global champion: $prev_id -> $new_id"
+          if [ -z "$new_id" ] || [ "$new_id" = "$prev_id" ]; then
+            echo "no new global champion this run — state is committed, no issue needed"
+            exit 0
+          fi
+          echo "NEW CHAMPION bot $new_id — posting report"
           {
-            echo "## Arena Report — run ${{ github.run_id }}"
+            echo "## New Global Champion — bot $new_id (run ${{ github.run_id }})"
             echo ""
             echo "Oracle evaluations: **${{ steps.merge.outputs.evals }}**"
             echo "Candidate evaluations (all instruments): **${{ steps.merge.outputs.search }}**"
@@ -168,5 +188,5 @@ jobs:
             tail -20 LESSONS.md 2>/dev/null || echo "(none yet)"
             echo '```'
           } > report.md
-          gh issue create --title "Arena Report — run ${{ github.run_id }}" \
+          gh issue create --title "New Global Champion — bot $new_id (run ${{ github.run_id }})" \
              --body-file report.md --label arena-report || true

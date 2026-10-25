@@ -21,7 +21,7 @@ heavy.
 
 ## The two instruments (the trillion protocol)
 
-The oracle is honest and slow: a real encode+decode is ~0.26s, so a nightly
+The oracle is honest and slow: a real encode+decode is ~0.26s, so a single
 run can measure ~10^5 bots. Mass search at that rate would take centuries to
 reach a trillion candidates — so the arena grew a second instrument:
 
@@ -45,8 +45,10 @@ Two counters, printed side by side, never borrowing from each other:
   true size — this is the million → billion → **trillion** number)
 
 20 shards × 20 generations × 2.65e9 screens ≈ **1.06 × 10^12 candidates per
-nightly run**, for zero dollars, with every promoted bot verified by real
-pixels. A surrogate judgment is cheap; a leaderboard seat is not.
+run, six runs a day** (cron every 4h, plus an hourly heartbeat that
+re-dispatches if GitHub drops one), for zero dollars, with every promoted
+bot verified by real pixels. A surrogate judgment is cheap; a leaderboard
+seat is not.
 
 ## The bet (why this is asymmetric)
 
@@ -72,8 +74,9 @@ brain/evolve.mojo Mojo brain (v0 kernel; python stays canonical)
 state/surrogate.txt  the response surface, fit on every oracle eval ever made
 state/surrogate_meta.json  training receipt (n, alpha, spearman, replay log)
 tools/anchor.py   real-codec bar: x264/x265/SVT-AV1/libaom via ffmpeg
-tools/merge_results.py   nightly merge → leaderboard, lessons, milestones
-.github/workflows/arena.yml   20 parallel shards, nightly, self-reporting
+tools/merge_results.py   merge → leaderboard, lessons, milestones (race-safe push)
+.github/workflows/arena.yml   20 parallel shards, 6×/day, self-reporting
+.github/workflows/heartbeat.yml   hourly catch-up net: re-dispatches a dropped cron
 ```
 
 ## How a run works
@@ -113,8 +116,8 @@ in `LESSONS.md`, every milestone is logged in `state/lifetime_evals.json`.
 
 - **v0.1** — arena live, 20-shard CI, real-codec anchor table. ✓ (533K oracle evals)
 - **v0.2 (now)** — the trillion protocol: surrogate screen cascade,
-  1e12+ candidate evaluations per nightly run, per-island refits,
-  Mojo toolchain status receipt. ✓
+  1e12+ candidate evaluations per run at a 6×/day cadence (~6.4e12/day),
+  per-island refits, Mojo toolchain status receipt. ✓
 - **v0.3 (7d)** — champion beats the gen-0 seed pool by ≥25% fitness;
   surrogate ablation (screens on/off) published as a lesson.
 - **v0.4 (30d)** — champion ≥ x264 *ultrafast* at equal PSNR on this corpus.

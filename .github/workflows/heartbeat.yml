@@ -1,0 +1,74 @@
+name: heartbeat
+
+# GitHub drops scheduled runs under load (observed 2026-10-25: the 21:37 UTC
+# arena cron never fired, while the previous night's fired 24 min late). The
+# arena's throughput promise is "at least six runs a day", so the heartbeat is
+# the catch-up net: every hour it checks when the arena last started a run.
+# If the arena has been idle for more than 3h55m and nothing is in flight,
+# it dispatches one. Six crons + heartbeat = the cadence holds forever.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 * * * *"
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: heartbeat
+  cancel-in-progress: false
+
+jobs:
+  catch-up:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch arena if idle > 3h55m
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          idle_secs=14100   # 3h55m; arena crons are spaced 4h apart
+
+          dispatch() {
+            curl -sf -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/actions/workflows/arena.yml/dispatches" \
+              -d '{"ref":"main","inputs":{}}'
+            echo "arena run dispatched (catch-up)"
+          }
+
+          # last arena run regardless of status; tolerate transient API errors
+          resp=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/workflows/arena.yml/runs?per_page=1" || true)
+          last=$(echo "$resp" | python3 -c "import json,sys;d=json.load(sys.stdin);r=(d.get('workflow_runs') or [None])[0];print((r['created_at'] if r else '')+' '+(r['status'] if r else 'none'))" 2>/dev/null || echo " none")
+
+          last_ts_str=$(echo "$last" | awk '{print $1}')
+          last_status=$(echo "$last" | awk '{print $2}')
+
+          if [ -z "$last_ts_str" ]; then
+            echo "no arena runs on record — dispatching the first"
+            dispatch
+            exit 0
+          fi
+
+          now=$(date +%s)
+          last_ts=$(date -d "$last_ts_str" +%s)
+          age=$((now - last_ts))
+          echo "last arena run: $last_ts_str (status=$last_status, age=$((age / 60))m)"
+
+          if [ "$last_status" != "completed" ]; then
+            echo "a run is in flight — nothing to do"
+            exit 0
+          fi
+
+          if [ "$age" -lt "$idle_secs" ]; then
+            echo "arena is fresh — nothing to do"
+            exit 0
+          fi
+
+          echo "arena idle past the 3h55m floor — a cron was dropped or delayed"
+          dispatch
