@@ -40,14 +40,15 @@ prior every 4 generations adapt it to each shard's corner of the landscape.
 
 ## The cadence (v0.2.1)
 
-- 20 shards × 20 gens × 256 pop oracle evals = **102,400 oracle evals/run**.
-- 20 shards × 20 gens × 2.65e9 screens = **1.06e12 candidate evals/run**.
+- 20 shards × 28 gens × 256 pop oracle evals = **143,360 oracle evals/run**.
+- 20 shards × 28 gens × 2.65e9 screens = **1.48e12 candidate evals/run**.
 - The arena runs **six times a day** (crons at 01:37/05:37/09:37/13:37/17:37/21:37
-  UTC) plus an hourly heartbeat that re-dispatches any run GitHub dropped
-  (observed: the 2026-10-25 21:37 cron never fired). So: **+6.4 trillion
-  search evals every single day**, ~600K of them promoted-and-oracle-verified,
-  for $0. The heartbeat costs ~24 runner-minutes a day; the shards pay for
-  themselves in evals.
+  UTC — four-hour spacing), plus an hourly heartbeat that re-dispatches any run
+  GitHub dropped (observed: the 2026-10-25 21:37 cron never fired). Shard
+  wall time is ~53–65 min at 20 gens, ~90 min at 28 — both fit the 4h slot
+  with room to spare. So: **+8.9 trillion search evals every single day**,
+  ~860K of them promoted-and-oracle-verified, for $0. The heartbeat costs
+  ~24 runner-minutes a day; the shards pay for themselves in evals.
 
 ## Paths beyond 1e12
 

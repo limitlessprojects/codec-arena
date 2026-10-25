@@ -5,7 +5,7 @@ on:
     inputs:
       gens:
         description: "generations per shard"
-        default: "20"
+        default: "28"
       pop:
         description: "population per shard"
         default: "256"
@@ -43,7 +43,7 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             N=${{ inputs.shards }}; G=${{ inputs.gens }}; P=${{ inputs.pop }}; S=${{ inputs.screens }}
           else
-            N=20; G=20; P=256; S=2650000000
+            N=20; G=28; P=256; S=2650000000
           fi
           echo "shards=[$(seq -s, 0 $((N-1)))]" >> "$GITHUB_OUTPUT"
           echo "gens=$G"     >> "$GITHUB_OUTPUT"
