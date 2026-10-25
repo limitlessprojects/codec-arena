@@ -1,0 +1,303 @@
+{
+ "n_pairs": 356377,
+ "alpha": 10.0,
+ "spearman_holdout": 0.7015,
+ "spearman_all": 0.7023,
+ "r2_holdout": 0.9546,
+ "features": 153,
+ "layout": "1 + 16 linear + 136 quadratic (i>=j, row-major)",
+ "trained_on": [
+  {
+   "run": 40113226256,
+   "gens": 40,
+   "pop": 512
+  },
+  {
+   "run": 40136759247,
+   "gens": 20,
+   "pop": 256
+  }
+ ],
+ "replays": [
+  {
+   "src": "prior/raw3",
+   "shard": 0,
+   "pairs": 6149,
+   "mode": "partial",
+   "err": "shard 0 gen 12: id 5475 != 5180"
+  },
+  {
+   "src": "prior/raw3",
+   "shard": 1,
+   "pairs": 6663,
+   "mode": "partial",
+   "err": "shard 1 gen 13: id 10006061 != 10005741"
+  },
+  {
+   "src": "prior/raw3",
+   "shard": 10,
+   "pairs": 11267,
+   "mode": "partial",
+   "err": "shard 10 gen 22: id 100010562 != 100010393"
+  },
+  {
+   "src": "prior/raw3",
+   "shard": 11,
+   "pairs": 12295,
+   "mode": "partial",
+   "err": "shard 11 gen 24: id 110011500 != 110011437"
+  },
+  {
+   "src": "prior/raw3",
+   "shard": 12,
+   "pairs": 9220,
+   "mode": "partial",
+   "err": "shard 12 gen 18: id 120008121 != 120008045"
+  },
+  {
+   "src": "prior/raw3",
+   "shard": 13,
+   "pairs": 10241,
+   "mode": "partial",
+   "err": "shard 13 gen 20: id 130009309 != 130009113"
+  },
+  {
+   "src": "prior/raw3",
+   "shard": 14,
+   "pairs": 20992,
+   "mode": "full",
+   "final_match": 512
+  },
+  {
+   "src": "prior/raw3",
+   "shard": 15,
+   "pairs": 7682,
+   "mode": "partial",
+   "err": "shard 15 gen 15: id 150007021 != 150006551"
+  },
+  {
+   "src": "prior/raw3",
+   "shard": 16,
+   "pairs": 11271,
+   "mode": "partial",
+   "err": "shard 16 gen 22: id 160010608 != 160010274"
+  },
+  {
+   "src": "prior/raw3",
+   "shard": 17,
+   "pairs": 16389,
+   "mode": "partial",
+   "err": "shard 17 gen 32: id 170015809 != 170015671"
+  },
+  {
+   "src": "prior/raw3",
+   "shard": 18,
+   "pairs": 11781,
+   "mode": "partial",
+   "err": "shard 18 gen 23: id 180011001 != 180010950"
+  },
+  {
+   "src": "prior/raw3",
+   "shard": 19,
+   "pairs": 18432,
+   "mode": "partial",
+   "err": "shard 19 gen 36: id 190017494 != 190017447"
+  },
+  {
+   "src": "prior/raw3",
+   "shard": 2,
+   "pairs": 12295,
+   "mode": "partial",
+   "err": "shard 2 gen 24: id 20011409 != 20011359"
+  },
+  {
+   "src": "prior/raw3",
+   "shard": 3,
+   "pairs": 17920,
+   "mode": "partial",
+   "err": "shard 3 gen 35: id 30017371 != 30016965"
+  },
+  {
+   "src": "prior/raw3",
+   "shard": 4,
+   "pairs": 11783,
+   "mode": "partial",
+   "err": "shard 4 gen 23: id 40011170 != 40010982"
+  },
+  {
+   "src": "prior/raw3",
+   "shard": 5,
+   "pairs": 14853,
+   "mode": "partial",
+   "err": "shard 5 gen 29: id 50013989 != 50013942"
+  },
+  {
+   "src": "prior/raw3",
+   "shard": 6,
+   "pairs": 6146,
+   "mode": "partial",
+   "err": "shard 6 gen 12: id 60005517 != 60005458"
+  },
+  {
+   "src": "prior/raw3",
+   "shard": 7,
+   "pairs": 13829,
+   "mode": "partial",
+   "err": "shard 7 gen 27: id 70012935 != 70012873"
+  },
+  {
+   "src": "prior/raw3",
+   "shard": 8,
+   "pairs": 8708,
+   "mode": "partial",
+   "err": "shard 8 gen 17: id 80008031 != 80007787"
+  },
+  {
+   "src": "prior/raw3",
+   "shard": 9,
+   "pairs": 13831,
+   "mode": "partial",
+   "err": "shard 9 gen 27: id 90013275 != 90012840"
+  },
+  {
+   "src": "prior/raw",
+   "shard": 0,
+   "pairs": 5376,
+   "mode": "full",
+   "final_match": 256
+  },
+  {
+   "src": "prior/raw",
+   "shard": 1,
+   "pairs": 5376,
+   "mode": "full",
+   "final_match": 256
+  },
+  {
+   "src": "prior/raw",
+   "shard": 10,
+   "pairs": 5376,
+   "mode": "full",
+   "final_match": 256
+  },
+  {
+   "src": "prior/raw",
+   "shard": 11,
+   "pairs": 4099,
+   "mode": "partial",
+   "err": "shard 11 gen 16: id 110003805 != 110003669"
+  },
+  {
+   "src": "prior/raw",
+   "shard": 12,
+   "pairs": 5376,
+   "mode": "full",
+   "final_match": 256
+  },
+  {
+   "src": "prior/raw",
+   "shard": 13,
+   "pairs": 5376,
+   "mode": "full",
+   "final_match": 256
+  },
+  {
+   "src": "prior/raw",
+   "shard": 14,
+   "pairs": 4868,
+   "mode": "partial",
+   "err": "shard 14 gen 19: id 140004581 != 140004438"
+  },
+  {
+   "src": "prior/raw",
+   "shard": 15,
+   "pairs": 4871,
+   "mode": "partial",
+   "err": "shard 15 gen 19: id 150003888 != 150004215"
+  },
+  {
+   "src": "prior/raw",
+   "shard": 16,
+   "pairs": 5376,
+   "mode": "full",
+   "final_match": 256
+  },
+  {
+   "src": "prior/raw",
+   "shard": 17,
+   "pairs": 5376,
+   "mode": "full",
+   "final_match": 256
+  },
+  {
+   "src": "prior/raw",
+   "shard": 18,
+   "pairs": 5376,
+   "mode": "full",
+   "final_match": 256
+  },
+  {
+   "src": "prior/raw",
+   "shard": 19,
+   "pairs": 5376,
+   "mode": "full",
+   "final_match": 256
+  },
+  {
+   "src": "prior/raw",
+   "shard": 2,
+   "pairs": 5376,
+   "mode": "full",
+   "final_match": 256
+  },
+  {
+   "src": "prior/raw",
+   "shard": 3,
+   "pairs": 518,
+   "mode": "partial",
+   "err": "shard 3 gen 2: id 30000199 != 30000035"
+  },
+  {
+   "src": "prior/raw",
+   "shard": 4,
+   "pairs": 5376,
+   "mode": "full",
+   "final_match": 256
+  },
+  {
+   "src": "prior/raw",
+   "shard": 5,
+   "pairs": 5376,
+   "mode": "full",
+   "final_match": 256
+  },
+  {
+   "src": "prior/raw",
+   "shard": 6,
+   "pairs": 5376,
+   "mode": "full",
+   "final_match": 256
+  },
+  {
+   "src": "prior/raw",
+   "shard": 7,
+   "pairs": 5376,
+   "mode": "full",
+   "final_match": 256
+  },
+  {
+   "src": "prior/raw",
+   "shard": 8,
+   "pairs": 5376,
+   "mode": "full",
+   "final_match": 256
+  },
+  {
+   "src": "prior/raw",
+   "shard": 9,
+   "pairs": 5376,
+   "mode": "full",
+   "final_match": 256
+  }
+ ]
+}

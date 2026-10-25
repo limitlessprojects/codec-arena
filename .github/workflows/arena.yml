@@ -12,6 +12,9 @@ on:
       shards:
         description: "number of parallel shards (max 20)"
         default: "20"
+      screens:
+        description: "surrogate screens per generation (0 = legacy GA path)"
+        default: "2650000000"
   schedule:
     - cron: "37 21 * * *"
 
@@ -30,17 +33,19 @@ jobs:
       shards: ${{ steps.calc.outputs.shards }}
       gens: ${{ steps.calc.outputs.gens }}
       pop: ${{ steps.calc.outputs.pop }}
+      screens: ${{ steps.calc.outputs.screens }}
     steps:
       - id: calc
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            N=${{ inputs.shards }}; G=${{ inputs.gens }}; P=${{ inputs.pop }}
+            N=${{ inputs.shards }}; G=${{ inputs.gens }}; P=${{ inputs.pop }}; S=${{ inputs.screens }}
           else
-            N=20; G=20; P=256
+            N=20; G=20; P=256; S=2650000000
           fi
           echo "shards=[$(seq -s, 0 $((N-1)))]" >> "$GITHUB_OUTPUT"
-          echo "gens=$G"   >> "$GITHUB_OUTPUT"
-          echo "pop=$P"    >> "$GITHUB_OUTPUT"
+          echo "gens=$G"     >> "$GITHUB_OUTPUT"
+          echo "pop=$P"      >> "$GITHUB_OUTPUT"
+          echo "screens=$S"  >> "$GITHUB_OUTPUT"
 
   evolve:
     needs: plan
@@ -55,10 +60,14 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
-      - name: Build arena (ReleaseFast)
-        run: zig build -Doptimize=ReleaseFast
+      - name: Build arena (ReleaseFast, v3 SIMD — hosted runners all support AVX2)
+        run: zig build -Doptimize=ReleaseFast -Dcpu=x86_64_v3
+      - name: Unit tests (genome parsing, surrogate layout, scoring)
+        run: zig build test -Dcpu=x86_64_v3
       - name: Generate deterministic corpus
         run: python3 tools/gen_corpus.py --out corpus/raw
+      - name: numpy guard (surrogate refits; optional but preferred)
+        run: python3 -c "import numpy" 2>/dev/null || pip install -q numpy
       - name: Seed anchor target if absent
         run: |
           if [ ! -f benchmarks/baseline.json ]; then
@@ -73,6 +82,8 @@ jobs:
             --gens ${{ needs.plan.outputs.gens }} \
             --pop ${{ needs.plan.outputs.pop }} \
             --elite 8 --seed ${{ github.run_id }} \
+            --screens ${{ needs.plan.outputs.screens }} \
+            --threads 4 \
             --zig zig-out/bin/arena --corpus corpus/raw \
             --out-dir out/shard-${{ matrix.shard }}
       - uses: actions/upload-artifact@v4
@@ -88,7 +99,7 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
-      - run: zig build -Doptimize=ReleaseFast
+      - run: zig build -Doptimize=ReleaseFast -Dcpu=x86_64_v3
       - run: python3 tools/gen_corpus.py --out corpus/raw
       - name: Install ffmpeg (not on 24.04 runner image)
         run: |
@@ -128,12 +139,14 @@ jobs:
         run: |
           python3 tools/merge_results.py --in-dir stage
           echo "evals=$(python3 -c "import json;print(json.load(open('state/lifetime_evals.json'))['lifetime_evals'])")" >> "$GITHUB_OUTPUT"
+          echo "search=$(python3 -c "import json;print(json.load(open('state/lifetime_evals.json'))['search_evals'])")" >> "$GITHUB_OUTPUT"
       - name: Commit state
         run: |
           git config user.name "codec-arena-bot"
           git config user.email "arena@limitlessprojects.dev"
           git add LEADERBOARD.md LESSONS.md state/ halloffame/ benchmarks/ 2>/dev/null || true
-          git commit -m "arena: run ${{ github.run_id }} — lifetime evals ${{ steps.merge.outputs.evals }} [skip ci]" || echo "nothing to commit"
+          git commit -m "arena: run ${{ github.run_id }} — oracle ${{ steps.merge.outputs.evals }}, search ${{ steps.merge.outputs.search }} [skip ci]" || echo "nothing to commit"
+          git pull --rebase origin main || true
           git push
       - name: Nightly issue report
         if: github.event_name == 'schedule'
@@ -143,7 +156,8 @@ jobs:
           {
             echo "## Arena Report — run ${{ github.run_id }}"
             echo ""
-            echo "Lifetime evaluations: **${{ steps.merge.outputs.evals }}**"
+            echo "Oracle evaluations: **${{ steps.merge.outputs.evals }}**"
+            echo "Candidate evaluations (all instruments): **${{ steps.merge.outputs.search }}**"
             echo ""
             echo '```'
             tail -40 LEADERBOARD.md

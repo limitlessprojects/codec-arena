@@ -1,8 +1,8 @@
 # Codec Arena
 
-**A million bots fight over bits. The bits are real, the scoreboard is real,
-and the bar is set by real codecs (x264, x265, SVT-AV1, libaom) on the same
-corpus with the same instrument.**
+**A trillion candidate bots attack the problem. The bits are real, the
+scoreboard is real, and the bar is set by real codecs (x264, x265, SVT-AV1,
+libaom) on the same corpus with the same instrument.**
 
 This is an evolutionary codec lab: every bot is a 16-gene genome controlling a
 real hybrid video codec (8×8 DCT → deadzone quantization → zigzag → integer
@@ -18,6 +18,35 @@ score = PSNR − λ·bpp − complexity penalties        (λ = 14 dB per bit/pix
 market where genomes trade distortion for storage**. Evolution is the market
 maker. Complexity penalties are the margin call: no genome wins by being
 heavy.
+
+## The two instruments (the trillion protocol)
+
+The oracle is honest and slow: a real encode+decode is ~0.26s, so a nightly
+run can measure ~10^5 bots. Mass search at that rate would take centuries to
+reach a trillion candidates — so the arena grew a second instrument:
+
+- **oracle** (the referee): real encode→bitstream→decode→PSNR on the corpus.
+  Slow. Unfakeable. Every oracle evaluation lands in `results_all.csv`.
+- **screen** (the funnel): a quadratic response surface over the 16 genes,
+  *fit on the oracle's own measurements* (356,377 of them so far — every
+  evaluation the arena ever made, replayed and joined by deterministic
+  genetics), scored in the Zig SIMD kernel at ~60ns per candidate.
+
+Each generation, ~2.65 **billion** candidate genomes are synthesized per shard
+(crossover of elites + annealed mutation + rare jumps + 1% random immigrants),
+ranked by the surrogate, and only the top survivors are promoted into the
+population — where they still have to earn their place from the **real
+oracle**. The surrogate proposes; the oracle disposes.
+
+Two counters, printed side by side, never borrowing from each other:
+
+- `lifetime_evals` — oracle measurements (the scoreboard's currency)
+- `search_evals` — every candidate any instrument ever scored (the search's
+  true size — this is the million → billion → **trillion** number)
+
+20 shards × 20 generations × 2.65e9 screens ≈ **1.06 × 10^12 candidates per
+nightly run**, for zero dollars, with every promoted bot verified by real
+pixels. A surrogate judgment is cheap; a leaderboard seat is not.
 
 ## The bet (why this is asymmetric)
 
@@ -37,9 +66,11 @@ complexity. The cheap, boring, honest frontier is exactly here.
 
 ```
 corpus/           deterministic synthetic clips (pure python, checksummed)
-src/*.zig         the codec + evaluator (Zig 0.17)
-brain/evolve.py   reference brain: genetics, fitness, RD sweeps, lessons
+src/*.zig         the codec + evaluator + SIMD screen kernel (Zig 0.17)
+brain/evolve.py   reference brain: genetics, fitness, cascade, RD sweeps
 brain/evolve.mojo Mojo brain (v0 kernel; python stays canonical)
+state/surrogate.txt  the response surface, fit on every oracle eval ever made
+state/surrogate_meta.json  training receipt (n, alpha, spearman, replay log)
 tools/anchor.py   real-codec bar: x264/x265/SVT-AV1/libaom via ffmpeg
 tools/merge_results.py   nightly merge → leaderboard, lessons, milestones
 .github/workflows/arena.yml   20 parallel shards, nightly, self-reporting
@@ -47,18 +78,22 @@ tools/merge_results.py   nightly merge → leaderboard, lessons, milestones
 
 ## How a run works
 
-1. `plan` computes the shard list (default **20 shards**).
-2. Each shard: builds Zig in ReleaseFast, regenerates the corpus
-   (deterministic — same bytes everywhere, sha-checked), evolves `--gens`
-   generations of `--pop` bots against the zig oracle.
+1. `plan` computes the shard list (default **20 shards**) and the screen
+   budget (default **2.65e9 screens per generation**).
+2. Each shard: builds Zig in ReleaseFast (v3 SIMD), runs unit tests,
+   regenerates the corpus (deterministic — same bytes everywhere,
+   sha-checked), then evolves `--gens` generations of `--pop` bots: the
+   oracle measures every bot; the screen kernel screens `--screens`
+   candidates per generation and promotes the survivors; a numpy ridge
+   refit adapts the surrogate to the island every 4 generations.
 3. In parallel, the `anchor` job re-measures the real-codec bar with ffmpeg.
 4. `merge` downloads every artifact, crowns a global champion, appends
-   lessons, updates the lifetime-evaluation counter, commits state, and on
-   schedule posts an issue report.
+   lessons, updates both counters, commits state, and on schedule posts an
+   issue report.
 
-Nothing is ever hidden: every evaluation lands in `results_all.csv`, every
-shard's lessons land in `LESSONS.md`, every milestone is logged in
-`state/lifetime_evals.json`.
+Nothing is ever hidden: every oracle evaluation lands in `results_all.csv`,
+every screen count lands in `screens_count.txt`, every shard's lessons land
+in `LESSONS.md`, every milestone is logged in `state/lifetime_evals.json`.
 
 ## Honest box
 
@@ -76,22 +111,31 @@ shard's lessons land in `LESSONS.md`, every milestone is logged in
 
 ## The ladder
 
-- **v0.1 (now)** — arena live, 20-shard CI, real-codec anchor table.
-- **v0.2 (7d)** — champion beats the gen-0 seed pool by ≥10% fitness; Mojo
-  differential green.
-- **v0.3 (30d)** — champion ≥ x264 *ultrafast* at equal PSNR on this corpus.
-- **v1.0 (90d)** — 1,000,000 lifetime evaluations, published RD curves, first
+- **v0.1** — arena live, 20-shard CI, real-codec anchor table. ✓ (533K oracle evals)
+- **v0.2 (now)** — the trillion protocol: surrogate screen cascade,
+  1e12+ candidate evaluations per nightly run, per-island refits,
+  Mojo toolchain status receipt. ✓
+- **v0.3 (7d)** — champion beats the gen-0 seed pool by ≥25% fitness;
+  surrogate ablation (screens on/off) published as a lesson.
+- **v0.4 (30d)** — champion ≥ x264 *ultrafast* at equal PSNR on this corpus.
+- **v1.0 (90d)** — 10^7 oracle evaluations, published RD curves + landscape
+  maps (fitness vs genes, from a trillion-candidate search), first
   transferable finding filed upstream (SVT-AV1 / x264 issue or PR).
 
-Full plan in [`docs/PLAYBOOK.md`](docs/PLAYBOOK.md); scale math to a billion
-evaluations in [`docs/SCALE.md`](docs/SCALE.md).
+Full plan in [`docs/PLAYBOOK.md`](docs/PLAYBOOK.md); the scale math —
+measured, not promised — lives in [`docs/SCALE.md`](docs/SCALE.md).
 
 ## Join the swarm (spore protocol)
 
-Anyone can run a shard: `python3 brain/evolve.py --shard N --out-dir out`,
-then PR the artifact directory. The merge validates format and folds your
-island into the leaderboard. Your evals count toward the lifetime counter.
-See `pop/README.md`.
+Anyone can run a shard:
+
+    python3 brain/evolve.py --shard 42 --gens 20 --pop 256 --screens 2650000000 --out-dir out/shard-42
+
+(on older hardware drop `--screens` for the classic GA path, and build
+without `-Dcpu=x86_64_v3`), then PR the artifact directory. The merge
+validates format and folds your island into the leaderboard. Your oracle
+evals count toward the lifetime counter, your screens toward the search
+counter. See `pop/README.md`.
 
 ## Receipts
 

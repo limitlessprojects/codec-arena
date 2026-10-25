@@ -2,11 +2,20 @@ name: mojo-brain
 
 # The Mojo brain is a first-class target. The Python brain is the reference
 # oracle. This job is best-effort: if Mojo's toolchain moves under us, the
-# arena still runs — the failure is recorded, not hidden.
+# arena still runs — the failure is recorded, not hidden. The status receipt
+# is committed back so the repo shows the toolchain's pulse.
+
 on:
   workflow_dispatch:
   schedule:
     - cron: "3 22 * * 0"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mojo-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -26,8 +35,17 @@ jobs:
           python3 tools/gen_seed.py --out /tmp/smoke_seed.txt --per-tribe 1
           /tmp/arena-brain --pop /tmp/smoke_seed.txt --gens 2 --out /tmp/mojo_out.txt
           head -4 /tmp/mojo_out.txt
-      - name: Record status
+      - name: Commit status receipt
         if: always()
         run: |
-          if [ $? -eq 0 ]; then echo "mojo brain: OK $(date -u)" > MOJO-STATUS.md;
-          else echo "mojo brain: build/run failed $(date -u) — python brain remains canonical" > MOJO-STATUS.md; fi
+          if [ -f /tmp/mojo_out.txt ]; then
+            echo "mojo brain: OK $(date -u) — smoke output $(wc -l < /tmp/mojo_out.txt) lines" > MOJO-STATUS.md
+          else
+            echo "mojo brain: build/run failed $(date -u) — python brain remains canonical" > MOJO-STATUS.md
+          fi
+          git config user.name "codec-arena-bot"
+          git config user.email "arena@limitlessprojects.dev"
+          git add MOJO-STATUS.md
+          git commit -m "mojo: toolchain status $(date -u +%F) [skip ci]" || echo "nothing to commit"
+          git pull --rebase origin main || true
+          git push || true

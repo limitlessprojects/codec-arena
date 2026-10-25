@@ -358,3 +358,41 @@ Nothing here is hand-written; nothing here is deleted.
 - gen 17 shard 9 (fit 16.079): halfpel -0.262
 - gen 18 shard 9 (fit 16.086): refresh -0.092
 - gen 19 shard 9 (fit 16.087): ent_mode -0.081
+
+## v0.2 — the trillion protocol (surrogate cascade)
+
+- **Two instruments, two counters.** The oracle (real encode+decode, ~0.26s)
+  caps throughput at ~1e5 evals/run — a century to a trillion. Added a second
+  instrument: a quadratic response surface over the 16 genes, scored in a Zig
+  SIMD kernel at ~58ns/candidate (17.2M/s measured on 4 sandbox threads).
+  Counters: lifetime_evals (oracle) and search_evals (screens + oracle),
+  printed side by side, never merged. A surrogate judgment is cheap; a
+  leaderboard seat is not.
+- **The prior was mined from the arena's own past.** Artifacts from runs
+  40113226256 + 40136759247 (all 20 shards each) were replayed with the
+  exact evolve.py RNG stream and id-asserted join: 356,377 (genes → fitness)
+  pairs, quadratic ridge α=10, Spearman ρ=0.70 / R²=0.95 held-out. Committed
+  as state/surrogate.txt + surrogate_meta.json (full replay log inside).
+- **Fitness rounding flips near-ties (forensic finding).** results_all.csv
+  stores fitness at 4 decimals; the oracle sorts on full precision. Replays
+  of converged islands (run 3: pop 512, 40 gens, mean fitness within 0.3 of
+  best) diverge when rounded ties swap sort order — run-4 shards replayed to
+  machine precision (hist_err 5e-15), run-3 shards diverged mid-run. Fix:
+  keep 4dp in artifacts (size), but remember replay is only exact for
+  unconverged runs. Partial replays still yield valid training rows (the
+  id-asserted prefix).
+- **Surrogate quality gate is the oracle itself.** Promoted bots re-enter the
+  population only through real measurement; if the funnel were garbage, the
+  legacy path (32% of slots: elites + classic bred children) still guards
+  progress. Smoke: 3 generations with screens moved mean fitness −21.6 → +8.7
+  (legacy GA needed ~15 gens for the same climb).
+- **Zig 0.17 gotchas, recorded for the next kernel:** the array-repeat
+  operator `**` rejects symmetric spacing in expression position (use
+  `var x: [N]f32 = @splat(0);`), locals must be const when unmutated, and
+  `zig build test` does not exist until build.zig declares a test step — CI
+  now runs it, so genome.zig's 19-token test line (format needs 21) is fixed
+  and guarded.
+- **Push races are real on Sundays.** arena merge (21:37 + ~45min) can
+  overlap mojo weekly (22:03); both workflows now `git pull --rebase` before
+  push, and mojo commits its MOJO-STATUS.md receipt instead of dropping it
+  into the void.

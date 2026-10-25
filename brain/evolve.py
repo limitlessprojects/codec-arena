@@ -11,13 +11,26 @@ bot and reports PSNR / bitrate / complexity. Fitness is computed here.
 LAMBDA is "the exchange rate between bits and distortion" — the market price
 a bot pays for quality. Everything else is bookkeeping.
 
+Two instruments (v0.2 — the trillion protocol):
+  oracle  — real encode+decode, ~0.26s/bot, counts toward lifetime_evals.
+  screen  — quadratic response surface (fit on the oracle's own history)
+            scores candidate genomes in ~60ns. Each generation, --screens
+            candidates are synthesized (crossover of elites + mutation +
+            rare jumps + immigrants), ranked by the surrogate in the Zig
+            SIMD kernel, and only the top --keep survivors are promoted
+            into the population for real oracle measurement.
+  lifetime_evals = oracle measurements.  search_evals = screens + oracle.
+  Both counters are honest and never borrow from each other.
+
 Outputs (to --out-dir, becomes a CI artifact):
-  results_all.csv     every evaluation this shard ever made
+  results_all.csv     every oracle evaluation this shard ever made
   pop_final.txt       final population (breed from these next run)
   leaderboard.md      shard-local top table
   lessons.md          what this shard learned (gene deltas of winners)
   rd.json             champion rate-distortion sweep vs anchor target
-  evals_count.txt     number of evaluations performed (for lifetime counter)
+  evals_count.txt     oracle evaluations (lifetime counter)
+  screens_count.txt   surrogate screens (search counter)
+  surrogate_final.txt the surrogate weights this shard last used
 """
 import argparse
 import json
@@ -90,6 +103,50 @@ def fitness(g, r, cfg):
     return score
 
 
+# ---- surrogate refit (per-shard adaptation; numpy optional) ----
+
+def features(genes):
+    """(16,) -> (153,) compact layout: 1 | 16 linear | 136 quadratic (i>=j)."""
+    v = [1.0]
+    v.extend(genes)
+    for i in range(NG):
+        for j in range(i + 1):
+            v.append(genes[i] * genes[j])
+    return v
+
+
+def load_weights(path):
+    with open(path) as f:
+        toks = f.read().split()
+    n = int(toks[0])
+    return [float(x) for x in toks[1 : 1 + n]]
+
+
+def save_weights(path, w):
+    with open(path, "w") as f:
+        f.write(f"{len(w)}\n")
+        f.write(" ".join(f"{x:.8e}" for x in w) + "\n")
+
+
+def refit_surrogate(rows, prior_w, out_path, alpha=50.0):
+    """Ridge refit toward the prior: min ||Xw-y||^2 + alpha||w-w_prior||^2.
+    rows: list of (genes, fit). Returns True if a new model was written."""
+    try:
+        import numpy as np
+    except ImportError:
+        return False
+    if len(rows) < 300:
+        return False
+    X = np.array([features(g) for g, _ in rows], dtype=np.float64)
+    y = np.array([f for _, f in rows], dtype=np.float64)
+    w0 = np.array(prior_w, dtype=np.float64)
+    XtX = X.T @ X
+    Xty = X.T @ y
+    w = np.linalg.solve(XtX + alpha * np.eye(153), Xty + alpha * w0)
+    save_weights(out_path, [float(v) for v in w])
+    return True
+
+
 def clamp01(x):
     return max(0.0, min(1.0, x))
 
@@ -118,6 +175,13 @@ def main():
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--config", default="brain/config.json")
     ap.add_argument("--anchor", default="benchmarks/baseline.json")
+    ap.add_argument("--screens", type=int, default=0,
+                    help="surrogate screens per generation (0 = legacy GA path)")
+    ap.add_argument("--keep", type=int, default=0,
+                    help="screen survivors promoted per gen (default pop/8*6)")
+    ap.add_argument("--threads", type=int, default=4, help="screen kernel threads")
+    ap.add_argument("--model", default="state/surrogate.txt",
+                    help="surrogate weights (153 compact floats)")
     ap.add_argument("--rd-sweep", action="store_true", default=True)
     args = ap.parse_args()
 
@@ -140,8 +204,23 @@ def main():
 
     all_csv = open(os.path.join(args.out_dir, "results_all.csv"), "w")
     n_evals = 0
+    n_screens = 0
     sigma0 = cfg["sigma0"]
     history = []
+
+    # cascade setup: how many elites / promoted / classically-bred per gen
+    use_screen = args.screens > 0 and os.path.exists(args.model)
+    if use_screen:
+        model_path = os.path.join(args.out_dir, "surrogate_live.txt")
+        with open(args.model) as fsrc, open(model_path, "w") as fdst:
+            fdst.write(fsrc.read())
+        prior_w = load_weights(args.model)
+        E = max(2, args.pop // 8)
+        bred_n = max(2, args.pop // 8)
+        K = args.keep if args.keep > 0 else args.pop - E - bred_n
+        fit_rows = []  # (genes, fit) oracle rows for per-shard refits
+    else:
+        E, bred_n, K = args.elite, 0, 0
 
     for gen in range(args.gens):
         t0 = time.time()
@@ -177,21 +256,82 @@ def main():
 
         # breed next generation
         sigma = sigma0 * (cfg["sigma_decay"] ** gen)
-        next_pop = [dict(g) for g in population[:args.elite]]
-        for g in next_pop:
-            g["gen"] = gen + 1
-        while len(next_pop) < args.pop:
-            a = tournament(population, 4, rng)
-            b = tournament(population, 4, rng)
-            child_g = [a["g"][i] if rng.random() < 0.5 else b["g"][i] for i in range(NG)]
-            if rng.random() < cfg["jump_p"]:
-                child_g[rng.randrange(NG)] = rng.random()
-            else:
-                child_g = mutate({"g": child_g}, sigma, rng)
-            nxt = {"id": args.shard * 10_000_000 + gen * args.pop + len(next_pop),
-                   "gen": gen + 1, "pa": a["id"], "pb": b["id"],
-                   "tribe": a["tribe"], "g": child_g}
-            next_pop.append(nxt)
+        if use_screen:
+            # --- trillion path: elites + surrogate-promoted + classic bred ---
+            population.sort(key=lambda g: -g["fit"])
+            elites = population[:E]
+            for g in elites:
+                g["gen"] = gen + 1
+            elite_path = os.path.join(args.out_dir, "elites.txt")
+            with open(elite_path, "w") as f:
+                for g in elites:
+                    f.write(genome_line(g) + "\n")
+            prom_path = os.path.join(args.out_dir, "promoted.txt")
+            cnt_path = os.path.join(args.out_dir, "screens.txt")
+            cmd = [args.zig, "screen", "--model", model_path,
+                   "--elites", elite_path, "--out", prom_path,
+                   "--count-out", cnt_path,
+                   "--lambda", str(args.screens), "--keep", str(K),
+                   "--seed", str(args.seed * 1000003 + args.shard * 131 + gen),
+                   "--threads", str(args.threads),
+                   "--sigma", "0.12", "--jump", "0.02", "--imm", "0.01"]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode != 0:
+                print(r.stderr, file=sys.stderr)
+                raise RuntimeError(f"arena screen failed rc={r.returncode}")
+            with open(cnt_path) as f:
+                n_screens += int(f.read().strip() or 0)
+            promoted = []
+            with open(prom_path) as f:
+                for line in f:
+                    t = line.split()
+                    if len(t) != 5 + NG:
+                        continue
+                    promoted.append({"id": 0, "gen": 0,
+                                     "pa": int(t[2]), "pb": int(t[3]),
+                                     "tribe": int(t[4]),
+                                     "g": [float(x) for x in t[5:]]})
+            next_pop = [dict(g) for g in elites]
+            for p in promoted[: K]:
+                nxt = {"id": args.shard * 10_000_000 + gen * args.pop + len(next_pop),
+                       "gen": gen + 1, "pa": p["pa"], "pb": p["pb"],
+                       "tribe": p["tribe"], "g": p["g"]}
+                next_pop.append(nxt)
+            while len(next_pop) < args.pop:
+                a = tournament(population, 4, rng)
+                b = tournament(population, 4, rng)
+                child_g = [a["g"][i] if rng.random() < 0.5 else b["g"][i] for i in range(NG)]
+                if rng.random() < cfg["jump_p"]:
+                    child_g[rng.randrange(NG)] = rng.random()
+                else:
+                    child_g = mutate({"g": child_g}, sigma, rng)
+                nxt = {"id": args.shard * 10_000_000 + gen * args.pop + len(next_pop),
+                       "gen": gen + 1, "pa": a["id"], "pb": b["id"],
+                       "tribe": a["tribe"], "g": child_g}
+                next_pop.append(nxt)
+            # per-shard surrogate adaptation (numpy optional, every 4 gens)
+            for g in population:
+                fit_rows.append((list(g["g"]), g["fit"]))
+            if gen >= 3 and gen % 4 == 3:
+                if refit_surrogate(fit_rows[-4000:], prior_w, model_path):
+                    prior_w = load_weights(model_path)
+        else:
+            # --- legacy GA path (pop seeded purely by classical genetics) ---
+            next_pop = [dict(g) for g in population[:args.elite]]
+            for g in next_pop:
+                g["gen"] = gen + 1
+            while len(next_pop) < args.pop:
+                a = tournament(population, 4, rng)
+                b = tournament(population, 4, rng)
+                child_g = [a["g"][i] if rng.random() < 0.5 else b["g"][i] for i in range(NG)]
+                if rng.random() < cfg["jump_p"]:
+                    child_g[rng.randrange(NG)] = rng.random()
+                else:
+                    child_g = mutate({"g": child_g}, sigma, rng)
+                nxt = {"id": args.shard * 10_000_000 + gen * args.pop + len(next_pop),
+                       "gen": gen + 1, "pa": a["id"], "pb": b["id"],
+                       "tribe": a["tribe"], "g": child_g}
+                next_pop.append(nxt)
         population = next_pop
         dt = time.time() - t0
         print(f"[shard {args.shard}] gen {gen}: best={best['fit']:.3f} "
@@ -251,9 +391,13 @@ def main():
         json.dump({"shard": args.shard, **champ, "metrics": res[champ["id"]]}, f, indent=1)
     with open(os.path.join(args.out_dir, "evals_count.txt"), "w") as f:
         f.write(str(n_evals))
+    with open(os.path.join(args.out_dir, "screens_count.txt"), "w") as f:
+        f.write(str(n_screens))
+    if use_screen:
+        save_weights(os.path.join(args.out_dir, "surrogate_final.txt"), prior_w)
     with open(os.path.join(args.out_dir, "history.json"), "w") as f:
         json.dump(history, f, indent=1)
-    print(f"[shard {args.shard}] DONE evals={n_evals}")
+    print(f"[shard {args.shard}] DONE evals={n_evals} screens={n_screens}")
 
 
 def tournament(pop, k, rng):

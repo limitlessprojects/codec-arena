@@ -8,6 +8,7 @@ const std = @import("std");
 const yuv = @import("yuv.zig");
 const gen = @import("genome.zig");
 const codec = @import("codec.zig");
+const screen = @import("screen.zig");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -69,6 +70,11 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, args.items[1], "screen")) {
+        try screenCmd(alloc, io, args.items[2..]);
+        return;
+    }
+
     if (std.mem.eql(u8, args.items[1], "debug")) {
         // arena debug CLIP.yuv W H FRAMES POPLINE...
         const w = try std.fmt.parseInt(u32, args.items[3], 10);
@@ -92,9 +98,75 @@ fn usage() void {
     std.debug.print(
         \\arena — evolutionary codec arena evaluator
         \\  eval --corpus DIR --pop FILE --out FILE [--slow]
+        \\  screen --model FILE --elites POPFILE --out POPFILE --count-out FILE
+        \\         --lambda N --keep K --seed S [--threads T] [--sigma F] [--jump F] [--imm F]
         \\  psnr A.yuv B.yuv W H FRAMES
         \\
     , .{});
+}
+
+fn screenCmd(alloc: std.mem.Allocator, io: std.Io, a: []const []const u8) !void {
+    var model_path: []const u8 = "state/surrogate.txt";
+    var elites_path: []const u8 = "out/elites.txt";
+    var out_path: []const u8 = "out/promoted.txt";
+    var count_out: []const u8 = "out/screens.txt";
+    var cfg = screen.Cfg{ .lambda = 1_000_000, .keep = 192, .seed = 42 };
+    var i: usize = 0;
+    while (i < a.len) : (i += 1) {
+        const arg = a[i];
+        if (i + 1 >= a.len and arg.len > 0 and arg[0] == '-') return error.BadArgs;
+        if (std.mem.eql(u8, arg, "--model")) {
+            i += 1;
+            model_path = a[i];
+        } else if (std.mem.eql(u8, arg, "--elites")) {
+            i += 1;
+            elites_path = a[i];
+        } else if (std.mem.eql(u8, arg, "--out")) {
+            i += 1;
+            out_path = a[i];
+        } else if (std.mem.eql(u8, arg, "--count-out")) {
+            i += 1;
+            count_out = a[i];
+        } else if (std.mem.eql(u8, arg, "--lambda")) {
+            i += 1;
+            cfg.lambda = try std.fmt.parseInt(u64, a[i], 10);
+        } else if (std.mem.eql(u8, arg, "--keep")) {
+            i += 1;
+            cfg.keep = try std.fmt.parseInt(usize, a[i], 10);
+        } else if (std.mem.eql(u8, arg, "--seed")) {
+            i += 1;
+            cfg.seed = try std.fmt.parseInt(u64, a[i], 10);
+        } else if (std.mem.eql(u8, arg, "--threads")) {
+            i += 1;
+            cfg.threads = try std.fmt.parseInt(usize, a[i], 10);
+        } else if (std.mem.eql(u8, arg, "--sigma")) {
+            i += 1;
+            cfg.sigma = try std.fmt.parseFloat(f32, a[i]);
+        } else if (std.mem.eql(u8, arg, "--jump")) {
+            i += 1;
+            cfg.jump_p = try std.fmt.parseFloat(f32, a[i]);
+        } else if (std.mem.eql(u8, arg, "--imm")) {
+            i += 1;
+            cfg.imm_p = try std.fmt.parseFloat(f32, a[i]);
+        }
+    }
+    var model = try screen.loadModel(alloc, io, model_path);
+
+    const dir = std.Io.Dir.cwd();
+    const pop_txt = try dir.readFileAlloc(io, elites_path, alloc, .limited(1 << 22));
+    var elites = std.ArrayList(gen.Genome).empty;
+    defer elites.deinit(alloc);
+    var it = std.mem.tokenizeAny(u8, pop_txt, "\n");
+    while (it.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        const gm = gen.parseLine(line) catch continue;
+        if (gm) |g| try elites.append(alloc, g);
+    }
+    if (elites.items.len < 2) return error.NeedTwoElites;
+
+    const total = try screen.run(alloc, io, cfg, &model, elites.items, out_path, count_out);
+    std.debug.print("screen: {d} candidates scored, top {d} promoted\n", .{ total, cfg.keep });
 }
 
 fn evalAll(

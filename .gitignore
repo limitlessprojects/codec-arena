@@ -5,3 +5,4 @@ out/
 results.csv
 __pycache__/
 *.pyc
+prior/

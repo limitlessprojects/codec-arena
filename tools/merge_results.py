@@ -27,6 +27,7 @@ def main():
     shard_dirs = sorted(glob.glob(os.path.join(args.in_dir, "shard-*")))
     champs = []
     n_evals = 0
+    n_screens = 0
     lessons = []
 
     for sd in shard_dirs:
@@ -34,6 +35,10 @@ def main():
         if os.path.exists(ec):
             with open(ec) as f:
                 n_evals += int(f.read().strip() or 0)
+        sc = os.path.join(sd, "screens_count.txt")
+        if os.path.exists(sc):
+            with open(sc) as f:
+                n_screens += int(f.read().strip() or 0)
         cj = os.path.join(sd, "champion.json")
         if os.path.exists(cj):
             with open(cj) as f:
@@ -56,20 +61,31 @@ def main():
         with open(os.path.join(repo, "benchmarks", "baseline.json"), "w") as f:
             json.dump(base, f, indent=1)
 
-    # ---- lifetime counter ----
+    # ---- lifetime counters ----
+    # lifetime_evals: real oracle measurements (encode+decode on the corpus).
+    # search_evals: every candidate genome scored by ANY instrument
+    #               (surrogate screens + oracle). The search-scale counter —
+    #               this is "how many bots have attacked the problem".
     state_p = os.path.join(repo, "state", "lifetime_evals.json")
     state = {"lifetime_evals": 0, "runs": 0, "milestones": {}}
     if os.path.exists(state_p):
         with open(state_p) as f:
             state = json.load(f)
+    if "search_evals" not in state:
+        state["search_evals"] = state["lifetime_evals"]
     state["lifetime_evals"] += n_evals
+    state["search_evals"] += n_evals + n_screens
     state["runs"] += 1
     for m, key in [("1e5", 100_000), ("1e6", 1_000_000), ("1e7", 10_000_000),
                    ("1e8", 100_000_000), ("1e9", 1_000_000_000)]:
-        if key not in state.get("milestones", {}):
-            state.setdefault("milestones", {})
+        state.setdefault("milestones", {})
         if state["lifetime_evals"] >= key and m not in state["milestones"]:
             state["milestones"][m] = f"run {state['runs']}"
+    for m, key in [("1e6", 1_000_000), ("1e9", 1_000_000_000),
+                   ("1e12", 1_000_000_000_000)]:
+        state.setdefault("search_milestones", {})
+        if state["search_evals"] >= key and m not in state["search_milestones"]:
+            state["search_milestones"][m] = f"run {state['runs']}"
     os.makedirs(os.path.dirname(state_p), exist_ok=True)
     with open(state_p, "w") as f:
         json.dump(state, f, indent=1)
@@ -92,8 +108,13 @@ def main():
           "Every bot that ever lived in the arena is measured against the same",
           "corpus, the same decoder, the same exchange rate. Champions graduate",
           "to the Hall of Fame; the rest feed the lessons ledger.", "",
-          f"Lifetime evaluations: **{state['lifetime_evals']:,}** across {state['runs']} merge runs.",
-          f"Milestones: {json.dumps(state.get('milestones', {}))}", ""]
+          f"Oracle evaluations (real encode+decode): **{state['lifetime_evals']:,}**",
+          f"Candidate evaluations, all instruments (screens + oracle): **{state['search_evals']:,}**",
+          f"Merge runs: {state['runs']}.  Oracle milestones: {json.dumps(state.get('milestones', {}))}",
+          f"Search milestones: {json.dumps(state.get('search_milestones', {}))}", "",
+          "The two counters never borrow from each other: a surrogate screen is",
+          "a candidate judged cheaply; only the oracle (real encode+decode) can",
+          "put a bot on this board.", ""]
     if base and isinstance(base.get("codecs"), dict):
         lb += ["## The bar (real codecs, same corpus, same PSNR instrument)", "",
                "| codec | PSNR | bpp |", "|---|---|---|"]
@@ -140,8 +161,10 @@ def main():
 
     for line in report:
         print(line)
-    print(f"lifetime_evals={state['lifetime_evals']} runs={state['runs']} "
-          f"milestones={json.dumps(state.get('milestones', {}))}")
+    print(f"lifetime_evals={state['lifetime_evals']} search_evals={state['search_evals']} "
+          f"screens_this_run={n_screens} runs={state['runs']} "
+          f"milestones={json.dumps(state.get('milestones', {}))} "
+          f"search_milestones={json.dumps(state.get('search_milestones', {}))}")
 
 
 if __name__ == "__main__":
