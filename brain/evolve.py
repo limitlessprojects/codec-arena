@@ -40,12 +40,18 @@ import subprocess
 import sys
 import time
 
-NG = 16
+NG_EFF = 16          # effector genes (legacy layout preserved)
+NR_REG = 6           # regulator genes (GRN v1)
+NG = NG_EFF + NR_REG # 22 total; screens/refits model 22 linear + 16^2 quad
 GENE_NAMES = [
-    "keyint", "blk", "search", "baseq", "q_low", "q_mid", "q_high",
-    "deadzone", "skip", "p_qmul", "ent_mode", "dither", "halfpel",
+    # effectors (1..16) — g[1] and g[10] repurposed in v0.3 (were placebo)
+    "keyint", "dz_dc", "search", "baseq", "q_low", "q_mid", "q_high",
+    "deadzone", "skip", "p_qmul", "intra_b0", "dither", "halfpel",
     "refresh", "adaptq", "chroma_q",
+    # regulators (17..22) — decoder-derivable context, bounded gains
+    "mv_dz", "mv_q", "gop_q", "row_q", "skip_mv", "intra_gop",
 ]
+REG_DEFAULT = 0.5    # neutral regulator: gain 0, phenotype identical to v0.1
 
 
 def load_pop(path):
@@ -56,6 +62,8 @@ def load_pop(path):
             if not line or line.startswith("#"):
                 continue
             t = line.split()
+            if len(t) == 5 + 16:
+                t = t + [str(REG_DEFAULT)] * NR_REG  # v1 line: neutral regs
             if len(t) != 5 + NG:
                 continue
             pop.append({
@@ -106,10 +114,10 @@ def fitness(g, r, cfg):
 # ---- surrogate refit (per-shard adaptation; numpy optional) ----
 
 def features(genes):
-    """(16,) -> (153,) compact layout: 1 | 16 linear | 136 quadratic (i>=j)."""
+    """(22,) -> (159,): 1 | 22 linear | 136 quadratic over the 16 effectors."""
     v = [1.0]
     v.extend(genes)
-    for i in range(NG):
+    for i in range(NG_EFF):
         for j in range(i + 1):
             v.append(genes[i] * genes[j])
     return v
@@ -140,9 +148,11 @@ def refit_surrogate(rows, prior_w, out_path, alpha=50.0):
     X = np.array([features(g) for g, _ in rows], dtype=np.float64)
     y = np.array([f for _, f in rows], dtype=np.float64)
     w0 = np.array(prior_w, dtype=np.float64)
+    if w0.shape[0] != X.shape[1]:
+        return False
     XtX = X.T @ X
     Xty = X.T @ y
-    w = np.linalg.solve(XtX + alpha * np.eye(153), Xty + alpha * w0)
+    w = np.linalg.solve(XtX + alpha * np.eye(X.shape[1]), Xty + alpha * w0)
     save_weights(out_path, [float(v) for v in w])
     return True
 
@@ -181,8 +191,10 @@ def main():
                     help="screen survivors promoted per gen (default pop/8*6)")
     ap.add_argument("--threads", type=int, default=4, help="screen kernel threads")
     ap.add_argument("--model", default="state/surrogate.txt",
-                    help="surrogate weights (153 compact floats)")
+                    help="surrogate weights (153 legacy or 159 v2 compact floats)")
     ap.add_argument("--rd-sweep", action="store_true", default=True)
+    ap.add_argument("--probe", action="store_true", default=True,
+                    help="canalization probe: epsilon-mutant sweep of the champion")
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -274,7 +286,8 @@ def main():
                    "--lambda", str(args.screens), "--keep", str(K),
                    "--seed", str(args.seed * 1000003 + args.shard * 131 + gen),
                    "--threads", str(args.threads),
-                   "--sigma", "0.12", "--jump", "0.02", "--imm", "0.01"]
+                   "--sigma", f"{0.12 * (cfg['sigma_decay'] ** gen):.4f}",
+                   "--jump", "0.02", "--imm", "0.01"]
             r = subprocess.run(cmd, capture_output=True, text=True)
             if r.returncode != 0:
                 print(r.stderr, file=sys.stderr)
@@ -356,6 +369,58 @@ def main():
         for g in population:
             f.write(genome_line(g) + "\n")
 
+    # ---- canalization probe: does a small mutation cause a small fitness
+    # change? (the evolvability metric — biology calls it canalization).
+    # Doubles as a polish step: a better epsilon-mutant is promoted. ----
+    probe = None
+    if args.probe and population:
+        eps = 0.02
+        champ0 = population[0]
+        base_fit = champ0["fit"]
+        mutants = []
+        for i in range(NG):
+            for s in (-eps, eps):
+                mg = dict(champ0)
+                mg["g"] = list(champ0["g"])
+                mg["g"][i] = clamp01(mg["g"][i] + s)
+                mg["id"] = 9_500_000_000 + args.shard * 100_000 + len(mutants)
+                mutants.append((i, mg))
+        res_p = run_eval(args.zig, args.corpus, [m[1] for m in mutants],
+                         os.path.join(args.out_dir, "probe.csv"))
+        n_evals += len(mutants)
+        deltas = []
+        best_m = None
+        for i, mg in mutants:
+            r = res_p.get(mg["id"])
+            if r is None:
+                continue
+            f2 = fitness(mg, r, cfg)
+            deltas.append((GENE_NAMES[i], f2 - base_fit))
+            if best_m is None or f2 > best_m[0]:
+                best_m = (f2, mg, r)
+        if deltas:
+            import statistics
+            canal = statistics.median(abs(d[1]) for d in deltas)
+            worst = max(deltas, key=lambda d: abs(d[1]))
+            probe = {
+                "canalization_median_delta": round(canal, 4),
+                "n_mutants": len(deltas),
+                "worst_gene": worst[0],
+                "worst_delta": round(worst[1], 4),
+            }
+            if best_m and best_m[0] > base_fit:
+                # polish: the best epsilon-mutant earns the crown
+                champ0 = best_m[1]
+                champ0["fit"] = best_m[0]
+                population[0] = champ0
+                res[champ0["id"]] = best_m[2]
+                probe["polish_gain"] = round(best_m[0] - base_fit, 4)
+                with open(os.path.join(args.out_dir, "pop_final.txt"), "w") as f:
+                    for g in population:
+                        f.write(genome_line(g) + "\n")
+        with open(os.path.join(args.out_dir, "probe.json"), "w") as f:
+            json.dump(probe, f, indent=1)
+
     # leaderboard fragment
     champ = population[0]
     r = res[champ["id"]]
@@ -388,7 +453,10 @@ def main():
                        "champion": best_pt, "curve": rd_points}, f, indent=1)
 
     with open(os.path.join(args.out_dir, "champion.json"), "w") as f:
-        json.dump({"shard": args.shard, **champ, "metrics": res[champ["id"]]}, f, indent=1)
+        cj = {"shard": args.shard, **champ, "metrics": res[champ["id"]]}
+        if probe:
+            cj["canalization"] = probe
+        json.dump(cj, f, indent=1)
     with open(os.path.join(args.out_dir, "evals_count.txt"), "w") as f:
         f.write(str(n_evals))
     with open(os.path.join(args.out_dir, "screens_count.txt"), "w") as f:

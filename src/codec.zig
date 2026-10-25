@@ -1,8 +1,12 @@
 // codec.zig — a real (if tiny) hybrid video codec whose every behavior is
-// controlled by a 16-gene genome: 8x8 DCT, zigzag, deadzone quantization,
-// integer motion estimation with optional half-pel-refined decisions, intra
-// refresh, open-loop adaptive Q, two entropy modes. Encode -> bitstream ->
-// decode as INDEPENDENT paths; PSNR is measured on decoded output.
+// controlled by a genome: 16 effector genes (8x8 DCT, zigzag, deadzone
+// quantization, integer motion estimation with half-pel refinement, intra
+// refresh, adaptive Q, DC/band/low-frequency shaping) + 6 REGULATOR genes
+// (GRN v1) that modulate quantizer behavior per block/frame as a function of
+// decoder-derivable context: motion magnitude, GOP position, block row, and
+// intra flag. Regulation is one shared code path on both sides — encoder and
+// decoder can never disagree. Encode -> bitstream -> decode as INDEPENDENT
+// paths; PSNR is measured on decoded output.
 
 const std = @import("std");
 const yuv = @import("yuv.zig");
@@ -171,6 +175,48 @@ fn quantLevel(c: f32, q: f32, dz: f32, dith: f32) i32 {
     return if (c < 0) -li else li;
 }
 
+/// Shared per-level quantization step. THE single source of truth for how
+/// band scales, regulatory modulation, and intra low-frequency shaping
+/// combine. Used by the encoder quantizer, the encoder reconstructor, and
+/// both decoder paths — regulation can never desynchronize (canalization
+/// by code structure).
+fn levelQ(g: *const gen.Genome, qp: f32, base_scale: f32, k: usize, rc: gen.RegCtx) f32 {
+    const bs = gen.bandScale(g, zzBand(k));
+    var s = base_scale * gen.regQMod(g, rc) * bs;
+    if (rc.intra and zzBand(k) == 0) s *= gen.intraB0Mul(g);
+    return bandQ(qp, s);
+}
+
+/// Bilinear half-pel prediction block, shared by encoder search/recon and
+/// decoder reconstruction. Samples the reference at half-pel position
+/// (ox + hx/2, oy + hy/2), hx/hy in {-1,0,1}. Edge-clamped; identical on
+/// both sides by construction.
+fn interpBlock(prev: []const u8, pw: usize, ph: usize, ox: i32, oy: i32, hx: i32, hy: i32, out: *[64]u8) void {
+    const w: i32 = @intCast(pw);
+    const h: i32 = @intCast(ph);
+    for (0..8) |r| {
+        for (0..8) |c| {
+            const xn = 2 * (ox + @as(i32, @intCast(c))) + hx;
+            const yn = 2 * (oy + @as(i32, @intCast(r))) + hy;
+            const xi = @divFloor(xn, 2);
+            const xf = xn - 2 * xi; // 0 or 1
+            const yi = @divFloor(yn, 2);
+            const yf = yn - 2 * yi; // 0 or 1
+            const x0 = @max(0, @min(w - 1, xi));
+            const x1 = @max(0, @min(w - 1, xi + xf));
+            const y0 = @max(0, @min(h - 1, yi));
+            const y1 = @max(0, @min(h - 1, yi + yf));
+            const a: i32 = prev[@as(usize, @intCast(y0)) * pw + @as(usize, @intCast(x0))];
+            const b: i32 = prev[@as(usize, @intCast(y0)) * pw + @as(usize, @intCast(x1))];
+            const c2: i32 = prev[@as(usize, @intCast(y1)) * pw + @as(usize, @intCast(x0))];
+            const d: i32 = prev[@as(usize, @intCast(y1)) * pw + @as(usize, @intCast(x1))];
+            const v = @divTrunc(a * (2 - xf) * (2 - yf) + b * xf * (2 - yf) +
+                c2 * (2 - xf) * yf + d * xf * yf + 2, 4);
+            out[r * 8 + c] = @intCast(v);
+        }
+    }
+}
+
 // ------------------------------------------------------------- context
 
 const Ctx = struct {
@@ -198,6 +244,7 @@ const Ctx = struct {
     prev_frame_bytes: usize = 0,
     last_frame_bytes: usize = 0,
     dec_fi: u32 = 0,
+    cur_gop: f32 = 0,
     debug_px: bool = false,
 };
 
@@ -219,24 +266,23 @@ fn packPairs(ctx: *Ctx, lv: []const i32, last: usize) void {
     }
 }
 
-fn quantizeBlock(ctx: *Ctx, src: []const u8, qp: f32, scale: f32, lv: *[64]i32) void {
+fn quantizeBlock(ctx: *Ctx, src: []const u8, qp: f32, scale: f32, rc: gen.RegCtx, lv: *[64]i32) void {
     var coef: [64]f32 = undefined;
     dct8(src, &coef);
     ctx.dct_calls += 1;
-    const dz = gen.deadzone(ctx.g);
+    // base deadzone, motion-regulated; DC gets its own multiplier (dz_dc gene)
+    const dz0 = gen.regDeadzone(ctx.g, rc, gen.deadzone(ctx.g));
     const dith = gen.dither(ctx.g);
     for (0..64) |k| {
-        const bs = gen.bandScale(ctx.g, zzBand(k));
-        lv[k] = quantLevel(coef[ZZ[k]], bandQ(qp, scale * bs), dz, dith);
+        const dz = if (k == 0) dz0 * gen.dzDcMul(ctx.g) else dz0;
+        lv[k] = quantLevel(coef[ZZ[k]], levelQ(ctx.g, qp, scale, k, rc), dz, dith);
     }
 }
 
-fn dequantLevels(ctx: *Ctx, lv: *const [64]i32, qp: f32, scale: f32, out: *[64]f32) void {
+fn dequantLevels(ctx: *Ctx, lv: *const [64]i32, qp: f32, scale: f32, rc: gen.RegCtx, out: *[64]f32) void {
     for (0..64) |k| {
-        const bs = gen.bandScale(ctx.g, zzBand(k));
-        const q = bandQ(qp, scale * bs);
         const lf: f32 = @floatFromInt(lv[k]);
-        out[ZZ[k]] = lf * q;
+        out[ZZ[k]] = lf * levelQ(ctx.g, qp, scale, k, rc);
     }
 }
 
@@ -247,8 +293,15 @@ fn encodeFrame(ctx: *Ctx, fi: u32) !void {
     const clip = ctx.clip;
     const key_int = gen.keyInt(g);
     const is_i = (fi % key_int) == 0;
-    const qp_f: f32 = std.math.clamp(gen.baseQ(g) + ctx.qp_adj, 1.0, 120.0);
+    // GOP position in [0,1) — regulator context (decoder derives the same
+    // value from dec_fi, so frame-level regulation needs no side info)
+    const gop: f32 = @as(f32, @floatFromInt(fi % key_int)) / @as(f32, @floatFromInt(key_int));
+    // R2 (gop_q): frame-level quality ramp across the GOP. The modulated qp
+    // is transmitted in the frame header — decoder reads it, zero extra bits.
+    const qp_f0: f32 = std.math.clamp(gen.baseQ(g) + ctx.qp_adj, 1.0, 120.0);
+    const qp_f: f32 = std.math.clamp(qp_f0 * (1.0 + gen.regGain(g, 2) * (2.0 * gop - 1.0)), 1.0, 120.0);
     const qp: f32 = @round(qp_f);
+    ctx.cur_gop = gop;
 
     ctx.bw.putU8(if (is_i) 1 else 0);
     ctx.bw.putU8(@intFromFloat(qp));
@@ -318,9 +371,11 @@ fn encodePlane(
     const nby: usize = ph / 8;
     const rrow: usize = @intCast((fi / refresh) % @max(1, nby));
     const do_refresh = !is_i and !chroma and (fi / refresh) > 0;
+    const halfpel = gen.halfPel(g);
 
     var by: usize = 0;
     while (by < nby) : (by += 1) {
+        const by_n: f32 = (@as(f32, @floatFromInt(by)) + 0.5) / @as(f32, @floatFromInt(nby));
         var bx: usize = 0;
         while (bx < nbx) : (bx += 1) {
             const sx = bx * 8;
@@ -333,18 +388,24 @@ fn encodePlane(
             }
 
             const force_intra = is_i or (do_refresh and by == rrow);
+            var rc = gen.RegCtx{
+                .mv_n = 0,
+                .by_n = by_n,
+                .gop = ctx.cur_gop,
+                .intra = force_intra,
+            };
 
             if (force_intra) {
                 if (!is_i) ctx.bw.putU8(2); // intra-in-P marker
                 var lv: [64]i32 = undefined;
-                quantizeBlock(ctx, ctx.block_src[0..64], qp, iq_scale, &lv);
+                quantizeBlock(ctx, ctx.block_src[0..64], qp, iq_scale, rc, &lv);
                 var last: usize = 0;
                 for (0..64) |k| {
                     if (lv[k] != 0) last = k;
                 }
                 packPairs(ctx, lv[0..], last);
                 var deq: [64]f32 = undefined;
-                dequantLevels(ctx, &lv, qp, iq_scale, &deq);
+                dequantLevels(ctx, &lv, qp, iq_scale, rc, &deq);
                 idct8(&deq, enc[sy * pw + sx ..], pw, &ctx.idct_calls);
             } else {
                 // motion search against prev recon
@@ -376,18 +437,56 @@ fn encodePlane(
                     }
                 }
                 const perpx: f32 = @as(f32, @floatFromInt(best)) / 64.0;
-                if (perpx < gen.skipTh(g)) {
+                rc.mv_n = @min(1.0, (@as(f32, @floatFromInt(@abs(bdx))) + @as(f32, @floatFromInt(@abs(bdy)))) / 8.0);
+                // R4 (skip_mv): skip threshold scales with motion (encoder-side)
+                const skip_th = gen.regSkipTh(g, rc, gen.skipTh(g));
+                var subpel: u8 = 4; // (hx+1)*3+(hy+1); 4 = integer-pel center
+                var pred: [64]u8 = undefined;
+                const ox_i: i32 = @intCast(@as(i32, @intCast(sx)) + bdx);
+                const oy_i: i32 = @intCast(@as(i32, @intCast(sy)) + bdy);
+                if (halfpel) {
+                    // half-pel refinement around the integer MV
+                    var hb: u64 = best;
+                    var bhx: i32 = 0;
+                    var bhy: i32 = 0;
+                    var hp: [64]u8 = undefined;
+                    var hy2: i32 = -1;
+                    while (hy2 <= 1) : (hy2 += 1) {
+                        var hx2: i32 = -1;
+                        while (hx2 <= 1) : (hx2 += 1) {
+                            if (hx2 == 0 and hy2 == 0) continue;
+                            interpBlock(prev, pw, ph, ox_i, oy_i, hx2, hy2, &hp);
+                            const s2 = sadBlock(ctx.block_src[0..64], &hp, 8, ctx.opts.fast_sad);
+                            if (s2 < hb) {
+                                hb = s2;
+                                bhx = hx2;
+                                bhy = hy2;
+                            }
+                        }
+                    }
+                    if (bhx != 0 or bhy != 0) {
+                        subpel = @intCast((bhx + 1) * 3 + (bhy + 1));
+                        best = hb;
+                        interpBlock(prev, pw, ph, ox_i, oy_i, bhx, bhy, &pred);
+                    }
+                }
+                if (perpx < skip_th) {
                     ctx.bw.putU8(1); // skip: cur already == prev copy
                 } else {
-                    ctx.bw.putU8(0);
+                    if (subpel != 4) {
+                        ctx.bw.putU8(2); // inter with half-pel refinement
+                    } else {
+                        ctx.bw.putU8(0);
+                    }
                     ctx.bw.putSvarint(bdx);
                     ctx.bw.putSvarint(bdy);
-                    const ox: usize = @intCast(@as(i32, @intCast(sx)) + bdx);
-                    const oy: usize = @intCast(@as(i32, @intCast(sy)) + bdy);
-                    var pred: [64]u8 = undefined;
-                    var r2: usize = 0;
-                    while (r2 < 8) : (r2 += 1) {
-                        @memcpy(pred[r2 * 8 ..][0..8], prev[(oy + r2) * pw + ox ..][0..8]);
+                    if (subpel != 4) ctx.bw.putU8(subpel);
+                    if (subpel == 4) {
+                        var r3: usize = 0;
+                        while (r3 < 8) : (r3 += 1) {
+                            const prow = prev[@as(usize, @intCast(oy_i + @as(i32, @intCast(r3)))) * pw + @as(usize, @intCast(ox_i)) ..][0..8];
+                            @memcpy(pred[r3 * 8 ..][0..8], prow);
+                        }
                     }
                     // residual = src - pred, offset by 128 for DCT
                     var res: [64]u8 = undefined;
@@ -396,7 +495,7 @@ fn encodePlane(
                         res[k] = @intCast(std.math.clamp(d + 128, 0, 255));
                     }
                     var lv: [64]i32 = undefined;
-                    quantizeBlock(ctx, res[0..64], qp, pq_scale, &lv);
+                    quantizeBlock(ctx, res[0..64], qp, pq_scale, rc, &lv);
                     var last: usize = 0;
                     for (0..64) |k| {
                         if (lv[k] != 0) last = k;
@@ -404,7 +503,7 @@ fn encodePlane(
                     packPairs(ctx, lv[0..], last);
                     // reconstruct: pred + idct(dequant(residual))
                     var deq: [64]f32 = undefined;
-                    dequantLevels(ctx, &lv, qp, pq_scale, &deq);
+                    dequantLevels(ctx, &lv, qp, pq_scale, rc, &deq);
                     var rec: [64]u8 = undefined;
                     idct8(&deq, rec[0..64], 8, &ctx.idct_calls);
                     const dst = enc[sy * pw + sx ..];
@@ -473,6 +572,10 @@ fn decodeFrame(ctx: *Ctx, curY: []u8, curU: []u8, curV: []u8, prevY: []const u8,
     const qp: f32 = @floatFromInt(try ctx.br.getU8());
     const is_i = ftype == 1;
     const refresh = gen.refreshEvery(g);
+    const key_int = gen.keyInt(g);
+    // identical GOP-position derivation as the encoder — regulation contexts
+    // are decoder-derivable, so mirrored regulation costs zero side info
+    ctx.cur_gop = @as(f32, @floatFromInt(ctx.dec_fi % key_int)) / @as(f32, @floatFromInt(key_int));
 
     try decodePlane(ctx, is_i, qp, curY, prevY, clip.w, clip.h, false, refresh);
     try decodePlane(ctx, is_i, qp, curU, prevU, clip.w / 2, clip.h / 2, true, refresh);
@@ -501,11 +604,18 @@ fn decodePlane(
 
     var by: usize = 0;
     while (by < nby) : (by += 1) {
+        const by_n: f32 = (@as(f32, @floatFromInt(by)) + 0.5) / @as(f32, @floatFromInt(nby));
         var bx: usize = 0;
         while (bx < nbx) : (bx += 1) {
             const sx = bx * 8;
             const sy = by * 8;
             const force_intra = is_i or (do_refresh and by == rrow);
+            var rc = gen.RegCtx{
+                .mv_n = 0,
+                .by_n = by_n,
+                .gop = ctx.cur_gop,
+                .intra = force_intra,
+            };
 
             if (force_intra) {
                 if (!is_i) _ = try ctx.br.getU8(); // intra-in-P marker
@@ -519,10 +629,8 @@ fn decodePlane(
                     const lvl = try ctx.br.getSvarint();
                     k += run;
                     if (k >= 64) return error.Corrupt;
-                    const bs = gen.bandScale(g, zzBand(@intCast(k)));
-                    const q = bandQ(qp, iq_scale * bs);
                     const lf: f32 = @floatFromInt(lvl);
-                    coef[ZZ[@intCast(k)]] = lf * q;
+                    coef[ZZ[@intCast(k)]] = lf * levelQ(g, qp, iq_scale, @intCast(k), rc);
                     k += 1;
                 }
                 idct8(&coef, cur[sy * pw + sx ..], pw, &ctx.idct_calls);
@@ -533,12 +641,20 @@ fn decodePlane(
                 } else {
                     const dx = try ctx.br.getSvarint();
                     const dy = try ctx.br.getSvarint();
-                    const ox: usize = @intCast(@as(i32, @intCast(sx)) + @as(i32, @intCast(dx)));
-                    const oy: usize = @intCast(@as(i32, @intCast(sy)) + @as(i32, @intCast(dy)));
+                    rc.mv_n = @min(1.0, (@as(f32, @floatFromInt(@abs(dx))) + @as(f32, @floatFromInt(@abs(dy)))) / 8.0);
+                    const ox_i: i32 = @as(i32, @intCast(sx)) + @as(i32, @intCast(dx));
+                    const oy_i: i32 = @as(i32, @intCast(sy)) + @as(i32, @intCast(dy));
                     var pred: [64]u8 = undefined;
-                    var r2: usize = 0;
-                    while (r2 < 8) : (r2 += 1) {
-                        @memcpy(pred[r2 * 8 ..][0..8], prev[(oy + r2) * pw + ox ..][0..8]);
+                    if (flags == 2) {
+                        const code = try ctx.br.getU8();
+                        const hx = @as(i32, code / 3) - 1;
+                        const hy = @as(i32, code % 3) - 1;
+                        interpBlock(prev, pw, ph, ox_i, oy_i, hx, hy, &pred);
+                    } else {
+                        var r2: usize = 0;
+                        while (r2 < 8) : (r2 += 1) {
+                            @memcpy(pred[r2 * 8 ..][0..8], prev[@as(usize, @intCast(oy_i + @as(i32, @intCast(r2)))) * pw + @as(usize, @intCast(ox_i)) ..][0..8]);
+                        }
                     }
                     const npairs = try ctx.br.getUvarint();
                     var coef: [64]f32 = @splat(0);
@@ -549,10 +665,8 @@ fn decodePlane(
                         const lvl = try ctx.br.getSvarint();
                         k += run;
                         if (k >= 64) return error.Corrupt;
-                        const bs = gen.bandScale(g, zzBand(@intCast(k)));
-                        const q = bandQ(qp, pq_scale * bs);
                         const lf: f32 = @floatFromInt(lvl);
-                        coef[ZZ[@intCast(k)]] = lf * q;
+                        coef[ZZ[@intCast(k)]] = lf * levelQ(g, qp, pq_scale, @intCast(k), rc);
                         k += 1;
                     }
                     var rec: [64]u8 = undefined;

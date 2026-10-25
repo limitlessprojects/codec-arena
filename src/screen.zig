@@ -22,19 +22,24 @@ const gen = @import("genome.zig");
 
 pub const Model = struct {
     w0: f32,
-    w_lin: [16]f32,
-    w_quad: [256]f32, // flat 16x16, zeros in strict upper triangle
+    w_lin: [gen.NTOT]f32, // 22: 16 effectors + 6 regulators
+    w_quad: [256]f32, // flat 16x16 over EFFECTORS only, zeros in strict upper
 
-    /// Expand the compact 153-weight layout (1 + 16 + 136, triangular)
-    /// into the flat SIMD-friendly layout. Feature idx 17+T(i)+j maps to
-    /// quad[i*16+j], T(i)=i*(i+1)/2.
-    pub fn fromCompact(w: *const [153]f32) Model {
+    /// Expand the compact weight layout into the flat SIMD-friendly layout.
+    /// v1: 153 = 1 + 16 linear + 136 quad (regulator weights default 0 = neutral).
+    /// v2: 159 = 1 + 22 linear + 136 quad.
+    /// Quad feature idx 17+T(i)+j maps to quad[i*16+j], T(i)=i*(i+1)/2.
+    pub fn fromCompact(w: []const f32) !Model {
+        if (w.len != 153 and w.len != 159) return error.BadModel;
         var m: Model = undefined;
         m.w0 = w[0];
-        m.w_lin = undefined;
+        @memset(&m.w_lin, 0);
         @memset(&m.w_quad, 0);
-        for (0..16) |i| m.w_lin[i] = w[1 + i];
-        var idx: usize = 17;
+        for (0..gen.NG) |i| m.w_lin[i] = w[1 + i];
+        if (w.len == 159) {
+            for (0..gen.NR) |i| m.w_lin[gen.NG + i] = w[1 + gen.NG + i];
+        }
+        var idx: usize = 17 + if (w.len == 159) gen.NR else 0;
         for (0..16) |i| {
             for (0..i + 1) |j| {
                 m.w_quad[i * 16 + j] = w[idx];
@@ -44,9 +49,9 @@ pub const Model = struct {
         return m;
     }
 
-    pub inline fn score(self: *const Model, g: *const [16]f32) f32 {
-        const gv: @Vector(16, f32) = g.*;
-        const lv: @Vector(16, f32) = self.w_lin;
+    pub inline fn score(self: *const Model, g: *const [gen.NTOT]f32) f32 {
+        const gv: @Vector(16, f32) = g[0..16].*;
+        const lv: @Vector(16, f32) = self.w_lin[0..16].*;
         var acc: @Vector(16, f32) = @splat(self.w0);
         acc += lv * gv;
         var sum: @Vector(16, f32) = @splat(0.0);
@@ -55,7 +60,10 @@ pub const Model = struct {
             const wv: @Vector(16, f32) = self.w_quad[i * 16 ..][0..16].*;
             sum += wv * row;
         }
-        return @reduce(.Add, acc + sum);
+        // regulator linear terms (16..21)
+        var rsum: f32 = 0;
+        for (16..gen.NTOT) |i| rsum += self.w_lin[i] * g[i];
+        return @reduce(.Add, acc + sum) + rsum;
     }
 };
 
@@ -64,13 +72,13 @@ pub fn loadModel(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Model 
     const txt = try dir.readFileAlloc(io, path, alloc, .limited(1 << 20));
     var it = std.mem.tokenizeAny(u8, txt, " \t\r\n");
     const n = try std.fmt.parseInt(usize, it.next() orelse return error.BadModel, 10);
-    if (n != 153) return error.BadModel;
-    var w: [153]f32 = undefined;
-    for (0..153) |i| {
+    if (n != 153 and n != 159) return error.BadModel;
+    const w = try alloc.alloc(f32, n);
+    for (0..n) |i| {
         const tok = it.next() orelse return error.BadModel;
         w[i] = try std.fmt.parseFloat(f32, tok);
     }
-    return Model.fromCompact(&w);
+    return Model.fromCompact(w);
 }
 
 pub const Cfg = struct {
@@ -91,7 +99,7 @@ const Lineage = struct {
 
 const Slot = struct {
     score: f32,
-    g: [16]f32,
+    g: [gen.NTOT]f32,
     lin: Lineage,
 };
 
@@ -172,25 +180,27 @@ const WorkerCtx = struct {
 fn worker(ctx: *WorkerCtx) void {
     var rng = Rng.init(ctx.rng_seed);
     const ne = ctx.elites.len;
-    var g: [16]f32 = undefined;
+    var g: [gen.NTOT]f32 = undefined;
     var i: u64 = 0;
     while (i < ctx.my_lambda) : (i += 1) {
-        // --- synthesize one candidate bot ---
+        // --- synthesize one candidate bot (effectors + regulators) ---
         const ea = &ctx.elites[(rng.next() >> 32) % ne];
         const eb = &ctx.elites[(rng.next() >> 32) % ne];
         const lin = Lineage{ .pa = ea.id, .pb = eb.id, .tribe = ea.tribe };
         if (rng.unit() < ctx.cfg.imm_p) {
             // immigrant: fully random genome
-            for (0..16) |k| g[k] = rng.unit();
+            for (0..gen.NTOT) |k| g[k] = rng.unit();
         } else {
-            for (0..16) |k| {
-                var v = if (rng.next() & 1 == 0) ea.g[k] else eb.g[k];
+            for (0..gen.NTOT) |k| {
+                const pa: f32 = if (k < gen.NG) ea.g[k] else ea.reg[k - gen.NG];
+                const pb: f32 = if (k < gen.NG) eb.g[k] else eb.reg[k - gen.NG];
+                var v = if (rng.next() & 1 == 0) pa else pb;
                 v += (rng.unit() - 0.5) * 2.0 * ctx.cfg.sigma;
                 g[k] = gen.clamp01(v);
             }
         }
         if (rng.unit() < ctx.cfg.jump_p) {
-            g[(rng.next() >> 32) % 16] = rng.unit();
+            g[(rng.next() >> 32) % gen.NTOT] = rng.unit();
         }
         // --- score by the surrogate ---
         const s = ctx.model.score(&g);
@@ -269,12 +279,14 @@ pub fn run(
     defer out_file.close(io);
     var buf: [512]u8 = undefined;
     for (all[0..out_n]) |s| {
-        const line = try std.fmt.bufPrint(&buf, "0 0 {d} {d} {d} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4}\n", .{
+        const line = try std.fmt.bufPrint(&buf, "0 0 {d} {d} {d} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4}\n", .{
             s.lin.pa, s.lin.pb, s.lin.tribe,
             s.g[0],   s.g[1],   s.g[2],   s.g[3],
             s.g[4],   s.g[5],   s.g[6],   s.g[7],
             s.g[8],   s.g[9],   s.g[10],  s.g[11],
             s.g[12],  s.g[13],  s.g[14],  s.g[15],
+            s.g[16],  s.g[17],  s.g[18],  s.g[19],
+            s.g[20],  s.g[21],
         });
         try out_file.writeStreamingAll(io, line);
     }
@@ -285,20 +297,28 @@ pub fn run(
     return total;
 }
 
-test "model compact->flat layout" {
-    var w: [153]f32 = @splat(0);
-    for (0..153) |i| w[i] = @floatFromInt(i);
-    const m = Model.fromCompact(&w);
-    try std.testing.expectEqual(@as(f32, 0), m.w0);
-    try std.testing.expectEqual(@as(f32, 1), m.w_lin[0]);
+test "model compact->flat layout (v1 and v2)" {
+    var w1: [153]f32 = @splat(0);
+    for (0..153) |i| w1[i] = @floatFromInt(i);
+    const m1 = try Model.fromCompact(&w1);
+    try std.testing.expectEqual(@as(f32, 0), m1.w0);
+    try std.testing.expectEqual(@as(f32, 1), m1.w_lin[0]);
+    // legacy model: regulator weights neutral-zero
+    try std.testing.expectEqual(@as(f32, 0), m1.w_lin[16]);
     // feature idx 17 -> pair (0,0) -> quad[0]
-    try std.testing.expectEqual(@as(f32, 17), m.w_quad[0]);
+    try std.testing.expectEqual(@as(f32, 17), m1.w_quad[0]);
     // feature idx 17+T(1)+0 = 18 -> pair (1,0) -> quad[16]
-    try std.testing.expectEqual(@as(f32, 18), m.w_quad[16]);
+    try std.testing.expectEqual(@as(f32, 18), m1.w_quad[16]);
     // feature idx 17+T(2)+1 = 20 -> pair (2,1) -> quad[2*16+1]
-    try std.testing.expectEqual(@as(f32, 20), m.w_quad[33]);
+    try std.testing.expectEqual(@as(f32, 20), m1.w_quad[33]);
     // strict upper triangle stays zero
-    try std.testing.expectEqual(@as(f32, 0), m.w_quad[1]);
+    try std.testing.expectEqual(@as(f32, 0), m1.w_quad[1]);
+    // v2: 22 linear terms, quad starts at idx 23
+    var w2: [159]f32 = @splat(0);
+    for (0..159) |i| w2[i] = @floatFromInt(i);
+    const m2 = try Model.fromCompact(&w2);
+    try std.testing.expectEqual(@as(f32, 22), m2.w_lin[21]);
+    try std.testing.expectEqual(@as(f32, 23), m2.w_quad[0]);
 }
 
 test "screen deterministic top-k" {

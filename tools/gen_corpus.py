@@ -87,6 +87,49 @@ def clip_storm(rng):
     return frames
 
 
+def clip_quake(rng):
+    """High motion: two translating blocks on a shaking gradient background.
+    Stresses motion estimation hard — large vectors, fast direction flips."""
+    frames = []
+    ax, ay, avx, avy = 30.0, 40.0, 9.0, 6.0
+    bx, by, bvx, bvy = 230.0, 100.0, -8.0, 5.0
+    for t in range(FRAMES):
+        y = bytearray()
+        shake = ((t * 37) % 9) - 4
+        for r in range(H):
+            for c in range(W):
+                v = 90 + int(50 * math.sin((c + shake) * 0.05)) + int(20 * math.cos((r + shake) * 0.07))
+                da = (c - int(ax)) ** 2 + (r - int(ay)) ** 2
+                db = (c - int(bx)) ** 2 + (r - int(by)) ** 2
+                if da < 1600:
+                    v = 235 - da // 40
+                if db < 1200:
+                    v = 20 + db // 30
+                y.append(max(0, min(255, v)))
+        ax += avx; ay += avy
+        if ax < 20 or ax > W - 20: avx = -avx
+        if ay < 20 or ay > H - 20: avy = -avy
+        bx += bvx; by += bvy
+        if bx < 20 or bx > W - 20: bvx = -bvx
+        if by < 20 or by > H - 20: bvy = -bvy
+        frames.append(y)
+    return frames
+
+
+def clip_grain(rng):
+    """Independent spatiotemporal noise — the entropy ceiling. Motion search
+    is useless here; only quantizer discipline and skip logic matter."""
+    frames = []
+    for t in range(FRAMES):
+        y = bytearray()
+        lo, hi = 110 + (t % 3) * 12, 150 + (t % 5) * 8
+        for r in range(H):
+            for c in range(W):
+                y.append(lo + rng.randrange(hi - lo))
+        frames.append(y)
+    return frames
+
+
 def chroma_from_luma(y_frames):
     us, vs = [], []
     for y in y_frames:
@@ -105,7 +148,13 @@ def chroma_from_luma(y_frames):
     return us, vs
 
 
-CLIPS = [("drift", clip_drift), ("grid", clip_grid), ("storm", clip_storm)]
+CLIPS = [
+    ("drift", clip_drift),
+    ("grid", clip_grid),
+    ("storm", clip_storm),
+    ("quake", clip_quake),
+    ("grain", clip_grain),
+]
 
 
 def main():
