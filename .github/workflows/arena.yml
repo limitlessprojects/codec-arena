@@ -144,9 +144,15 @@ jobs:
           echo "evals=$(python3 -c "import json;print(json.load(open('state/lifetime_evals.json'))['lifetime_evals'])")" >> "$GITHUB_OUTPUT"
           echo "search=$(python3 -c "import json;print(json.load(open('state/lifetime_evals.json'))['search_evals'])")" >> "$GITHUB_OUTPUT"
       - name: Commit state (conflict-proof merge-and-push)
+        id: land
         run: |
           git config user.name "codec-arena-bot"
           git config user.email "arena@limitlessprojects.dev"
+          # champion id BEFORE this run's merge — the gate's baseline. Reading
+          # it later (post-push) is a dead comparison; this was the bug that
+          # kept the champion report silent forever.
+          git fetch origin main
+          PREV_CHAMP=$(git show origin/main:halloffame/champion.json 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])" 2>/dev/null || echo "")
           ok=""
           for i in 1 2 3 4 5 6; do
             # Merge always computes from FRESH origin state: if another run
@@ -169,13 +175,17 @@ jobs:
             git status -sb
             exit 1
           fi
+          NEW_CHAMP=$(python3 -c "import json;print(json.load(open('halloffame/champion.json'))['id'])" 2>/dev/null || echo "")
+          echo "global champion: $PREV_CHAMP -> $NEW_CHAMP"
+          echo "prev_champ=$PREV_CHAMP" >> "$GITHUB_OUTPUT"
+          echo "new_champ=$NEW_CHAMP" >> "$GITHUB_OUTPUT"
       - name: Champion report (issue only when a new global champion is crowned)
         if: github.event_name == 'schedule'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          new_id=$(python3 -c "import json;print(json.load(open('halloffame/champion.json'))['id'])" 2>/dev/null || echo "")
-          prev_id=$(git show origin/main:halloffame/champion.json 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])" 2>/dev/null || echo "")
+          new_id="${{ steps.land.outputs.new_champ }}"
+          prev_id="${{ steps.land.outputs.prev_champ }}"
           echo "global champion: $prev_id -> $new_id"
           if [ -z "$new_id" ] || [ "$new_id" = "$prev_id" ]; then
             echo "no new global champion this run — state is committed, no issue needed"
