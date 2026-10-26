@@ -1,4 +1,4 @@
-// genome.zig — a bot is 16 effector genes + 6 regulator genes, all in [0,1],
+// genome.zig — a bot is 18 effector genes + 6 regulator genes, all in [0,1],
 // plus lineage. The brain breeds them; the codec only needs to read them.
 //
 // v0.3 — the regulatory layer (GRN v1): regulators don't set codec knobs
@@ -11,9 +11,24 @@
 // map of its gene with gain bounded to ±0.25, neutral at gene = 0.5.
 // A 0.01 mutation changes output by at most ~0.5% of the modulated quantity.
 
-pub const NG: usize = 16; // effectors (legacy layout preserved)
+pub const NG: usize = 18; // effectors (legacy 16 preserved; v0.4 adds 2)
 pub const NR: usize = 6; // regulators
-pub const NTOT: usize = NG + NR; // 22
+pub const NTOT: usize = NG + NR; // 24
+
+// v0.4 structural genes (learned from the best of the best — x264's two
+// structural pillars). Migration invariant: gene 0.0 == EXACT legacy
+// behavior, so every pre-v0.4 genome keeps its oracle metrics byte-for-byte
+// and the Hall of Fame floor stays comparable.
+/// g[16]: intra spatial-prediction mode set (H.264/x264 intra prediction).
+///   <0.25 none (legacy raw-DCT) | <0.55 {none,DC} | <0.85 {DC,planar,V,H}
+///   | >=0.85 + 3 diagonal angles
+pub fn intraPredGene(g: *const Genome) f32 {
+    return clamp01(g.g[16]);
+}
+/// g[17]: in-loop deblocking filter strength (0 = off = legacy).
+pub fn deblockGene(g: *const Genome) f32 {
+    return clamp01(g.g[17]);
+}
 
 const std = @import("std");
 
@@ -28,33 +43,38 @@ pub const Genome = struct {
 };
 
 pub const GeneNames = [_][]const u8{
-    "keyint",   "dz_dc",    "search",   "baseq",
-    "q_low",    "q_mid",    "q_high",   "deadzone",
-    "skip",     "p_qmul",   "intra_b0", "dither",
-    "halfpel",  "refresh",  "adaptq",   "chroma_q",
+    "keyint",     "dz_dc",   "search",   "baseq",
+    "q_low",      "q_mid",   "q_high",   "deadzone",
+    "skip",       "p_qmul",  "intra_b0", "dither",
+    "halfpel",    "refresh", "adaptq",   "chroma_q",
+    "intra_pred", "deblock",
 };
 pub const RegNames = [_][]const u8{
     "mv_dz", // deadzone scales with motion magnitude   (encoder-side)
-    "mv_q",  // inter q-scale scales with motion        (decoder-mirrored)
+    "mv_q", // inter q-scale scales with motion        (decoder-mirrored)
     "gop_q", // frame qp ramps across the GOP           (transmitted qp)
     "row_q", // q-scale gradient by block row           (decoder-mirrored)
     "skip_mv", // skip threshold scales with motion     (encoder-side)
     "intra_gop", // intra q-scale ramps across the GOP  (decoder-mirrored)
 };
 
+pub const NEW_GENE_LEGACY: f32 = 0.0; // migration default: exact legacy behavior
+
 /// Parse one pop-file line:
-///   v1: id gen pa pb tribe g0..g15            (21 tokens; regs neutral)
-///   v2: id gen pa pb tribe g0..g15 r0..r5     (27 tokens)
+///   v1: id gen pa pb tribe g0..g15                  (21 tokens; regs neutral)
+///   v2: id gen pa pb tribe g0..g15 r0..r5           (27 tokens)
+///   v3: id gen pa pb tribe g0..g17 r0..r5           (29 tokens)
+/// v1/v2 lines migrate with the v0.4 genes at 0.0 = exact legacy behavior.
 pub fn parseLine(line: []const u8) !?Genome {
     var it = std.mem.tokenizeAny(u8, line, " \t\r");
-    var tok: [27][]const u8 = undefined;
+    var tok: [29][]const u8 = undefined;
     var n: usize = 0;
     while (it.next()) |t| {
-        if (n >= 27) return error.BadLine;
+        if (n >= 29) return error.BadLine;
         tok[n] = t;
         n += 1;
     }
-    if (n != 21 and n != 27) return null;
+    if (n != 21 and n != 27 and n != 29) return null;
     if (tok[0].len > 0 and tok[0][0] == '#') return null;
     var gm = Genome{
         .id = try std.fmt.parseInt(u64, tok[0], 10),
@@ -64,18 +84,31 @@ pub fn parseLine(line: []const u8) !?Genome {
         .tribe = try std.fmt.parseInt(u32, tok[4], 10),
         .g = undefined,
     };
-    for (0..NG) |i| {
-        gm.g[i] = try std.fmt.parseFloat(f32, tok[5 + i]);
+    for (0..16) |i| {
+        gm.g[i] = try std.fmt.parseFloat(f32, tok[5 + i]); // legacy effectors: fixed slots
+    }
+    if (n == 29) {
+        gm.g[16] = try std.fmt.parseFloat(f32, tok[21]); // v0.4: intra_pred
+        gm.g[17] = try std.fmt.parseFloat(f32, tok[22]); // v0.4: deblock
+    } else {
+        gm.g[16] = NEW_GENE_LEGACY; // migration: exact legacy behavior
+        gm.g[17] = NEW_GENE_LEGACY;
     }
     if (n == 27) {
         for (0..NR) |i| {
-            gm.reg[i] = try std.fmt.parseFloat(f32, tok[5 + NG + i]);
+            gm.reg[i] = try std.fmt.parseFloat(f32, tok[21 + i]);
         }
+    } else if (n == 29) {
+        for (0..NR) |i| {
+            gm.reg[i] = try std.fmt.parseFloat(f32, tok[23 + i]);
+        }
+    } else {
+        for (0..NR) |i| gm.reg[i] = 0.5; // v1: neutral regulators
     }
     return gm;
 }
 
-/// Emit a v2 pop-file line (27 tokens).
+/// Emit a v3 pop-file line (29 tokens).
 pub fn formatLine(g: *const Genome, buf: []u8) ![]const u8 {
     var fbs = std.io.fixedBufferStream(buf);
     const w = fbs.writer();
@@ -187,14 +220,36 @@ test "parse v1 and v2 lines" {
     try std.testing.expect(g1 != null);
     try std.testing.expectEqual(@as(u64, 1), g1.?.id);
     try std.testing.expectEqual(@as(u32, 8), blockSizeLegacyForTest(&g1.?));
-    // v1 line: regulators neutral
+    // v1 line: regulators neutral, v0.4 genes at legacy 0
     try std.testing.expectEqual(@as(f32, 0.5), g1.?.reg[0]);
     try std.testing.expectEqual(@as(f32, 0.5), g1.?.reg[5]);
+    try std.testing.expectEqual(@as(f32, 0.0), g1.?.g[16]);
+    try std.testing.expectEqual(@as(f32, 0.0), g1.?.g[17]);
     const g2 = try parseLine("2 0 0 0 7 0.1 0.9 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 0.05 0.5 0.5 0.5 0.11 0.22 0.9 0.1 0.5 0.5 0.5 0.7");
     try std.testing.expect(g2 != null);
     try std.testing.expectEqual(@as(f32, 0.9), g2.?.reg[0]);
     try std.testing.expectEqual(@as(f32, 0.1), g2.?.reg[1]);
     try std.testing.expectEqual(@as(f32, 0.7), g2.?.reg[5]);
+    try std.testing.expectEqual(@as(f32, 0.0), g2.?.g[16]);
+}
+
+test "parse and format v3 lines round-trip" {
+    var buf: [512]u8 = undefined;
+    var g = Genome{ .id = 77, .gen = 3, .pa = 9, .pb = 11, .tribe = 5, .g = @splat(0.5) };
+    g.g[16] = 0.9;
+    g.g[17] = 0.35;
+    g.reg[2] = 0.8;
+    const line = try formatLine(&g, &buf);
+    const back = try parseLine(line);
+    try std.testing.expect(back != null);
+    try std.testing.expectEqual(@as(u64, 77), back.?.id);
+    try std.testing.expectEqual(@as(f32, 0.9), back.?.g[16]);
+    try std.testing.expectEqual(@as(f32, 0.35), back.?.g[17]);
+    try std.testing.expectEqual(@as(f32, 0.8), back.?.reg[2]);
+    var ntok: usize = 0;
+    var it = std.mem.tokenizeAny(u8, line, " ");
+    while (it.next()) |_| ntok += 1;
+    try std.testing.expectEqual(@as(usize, 29), ntok);
 }
 
 // The legacy test asserted an 8-or-16 block size gene that was never wired

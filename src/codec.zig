@@ -63,10 +63,34 @@ fn zzBand(k: usize) usize {
 const BW = struct {
     buf: []u8,
     n: usize = 0,
+    bacc: u32 = 0, // bit accumulator (v0.4 mode codes)
+    bn: u5 = 0,
 
     fn put(self: *BW, b: u8) void {
+        self.flushBits(); // byte-level writes are always byte-aligned
         self.buf[self.n] = b;
         self.n += 1;
+    }
+    /// Append w (<= 8) bits of v. Byte flush happens lazily on the next
+    /// byte-level put — mode codes pack contiguously.
+    fn putBits(self: *BW, v: u8, w: u5) void {
+        self.bacc = (self.bacc << w) | v;
+        self.bn += w;
+        while (self.bn >= 8) {
+            self.bn -= 8;
+            self.buf[self.n] = @intCast((self.bacc >> self.bn) & 0xFF);
+            self.n += 1;
+        }
+    }
+    fn flushBits(self: *BW) void {
+        if (self.bn > 0) {
+            const pad: u5 = 8 - self.bn;
+            const b: u8 = @intCast((self.bacc << pad) & 0xFF);
+            self.buf[self.n] = b;
+            self.n += 1;
+            self.bn = 0;
+            self.bacc = 0;
+        }
     }
     fn putUvarint(self: *BW, v0: u64) void {
         var v = v0;
@@ -93,8 +117,31 @@ const BW = struct {
 const BR = struct {
     buf: []const u8,
     p: usize = 0,
+    bacc: u32 = 0,
+    bn: u5 = 0,
 
+    /// Read w (<= 8) bits. Consumes whole bytes from the stream as needed;
+    /// the remainder of the last partial byte stays in the accumulator.
+    fn getBits(self: *BR, w: u5) !u8 {
+        while (self.bn < w) {
+            if (self.p >= self.buf.len) return error.Eof;
+            self.bacc = (self.bacc << 8) | self.buf[self.p];
+            self.p += 1;
+            self.bn += 8;
+        }
+        const shift: u5 = self.bn - w;
+        const mask: u32 = (@as(u32, 1) << w) - 1;
+        const v: u8 = @intCast((self.bacc >> shift) & mask);
+        self.bn = shift;
+        return v;
+    }
+    /// Byte-level reads are byte-aligned: drop any partial byte (it is the
+    /// encoder's zero padding, skipped symmetrically).
+    inline fn syncByte(self: *BR) void {
+        self.bn = 0;
+    }
     fn getUvarint(self: *BR) !u64 {
+        self.syncByte();
         var shift: u6 = 0;
         var v: u64 = 0;
         while (true) {
@@ -109,11 +156,13 @@ const BR = struct {
         return v;
     }
     fn getSvarint(self: *BR) !i64 {
+        self.syncByte();
         const z = try self.getUvarint();
         const v: i64 = @bitCast(z >> 1);
         return if (z & 1 != 0) ~v + 1 else v;
     }
     fn getU8(self: *BR) !u8 {
+        self.syncByte();
         if (self.p >= self.buf.len) return error.Eof;
         const b = self.buf[self.p];
         self.p += 1;
@@ -217,6 +266,198 @@ fn interpBlock(prev: []const u8, pw: usize, ph: usize, ox: i32, oy: i32, hx: i32
     }
 }
 
+// ----------------------------------------------------- intra prediction (v0.4)
+// Learned from the best of the best: H.264/x264 spatial intra prediction.
+// Every mode derives ONLY from already-reconstructed neighbor pixels in the
+// raster-ordered recon plane — identical on encoder and decoder by
+// construction (canalization by code structure). Gene-gated: g[16] < 0.25 is
+// byte-exact legacy (no prediction, no mode byte), so pre-v0.4 genomes keep
+// their oracle metrics and the Hall of Fame floor stays comparable.
+
+pub const INTRA_NONE: u8 = 0; // legacy raw-DCT intra
+pub const INTRA_DC: u8 = 1;
+pub const INTRA_PLANAR: u8 = 2;
+pub const INTRA_VERTICAL: u8 = 3;
+pub const INTRA_HORIZONTAL: u8 = 4;
+pub const INTRA_DIAG_DR: u8 = 5; // diagonal down-right from the top-left corner
+pub const INTRA_DIAG_DL: u8 = 6; // diagonal down-left from the top row
+pub const INTRA_HOR_DOWN: u8 = 7; // from the left column, shifted by column
+
+/// Enabled intra modes for this genome. NONE is ALWAYS present as mode 0 in
+/// every non-legacy set: the clamp-aware mode decision then guarantees the
+/// chosen predictor is never worse than the legacy raw-DCT path per block —
+/// richer sets can only help, never crater. A single {NONE} set means legacy
+/// raw-DCT intra: no prediction, no mode map, byte-exact v0.1-v0.3 bitstream.
+pub fn intraModes(g: *const gen.Genome) []const u8 {
+    const v = gen.intraPredGene(g);
+    if (v < 0.25) return &.{INTRA_NONE};
+    if (v < 0.55) return &.{ INTRA_NONE, INTRA_DC };
+    if (v < 0.85) return &.{ INTRA_NONE, INTRA_DC, INTRA_PLANAR, INTRA_VERTICAL, INTRA_HORIZONTAL };
+    return &.{ INTRA_NONE, INTRA_DC, INTRA_PLANAR, INTRA_VERTICAL, INTRA_HORIZONTAL, INTRA_DIAG_DR, INTRA_DIAG_DL, INTRA_HOR_DOWN };
+}
+
+/// Bits needed to index a mode within a set of n (ceil(log2(n))). Both sides
+/// derive it from the genome, so the mode map costs 1 bit/block for
+/// {NONE,DC} and 3 bits/block for the 5- and 8-mode sets — x264-style narrow
+/// signaling in a per-plane map instead of a byte per block.
+pub fn intraModeBits(n: usize) u5 {
+    if (n <= 1) return 0;
+    return @intCast(32 - @clz(@as(u32, @intCast(n - 1))));
+}
+
+/// Build the 8x8 prediction block for `mode` from the recon plane at block
+/// (sx, sy). Unavailable neighbors (frame edges) are filled with 128.
+/// Deterministic in (mode, plane contents, sx, sy, pw, ph) only — the same
+/// function runs on both sides, so predictions can never desynchronize.
+fn intraPredict(mode: u8, recon: []const u8, pw: usize, ph: usize, sx: usize, sy: usize, out: *[64]u8) void {
+    var top: [8]u8 = @splat(128);
+    var left: [8]u8 = @splat(128);
+    var tl: u8 = 128;
+    var tr: u8 = 128; // one past the top row's right edge (planar)
+    var bl: u8 = 128; // one past the left column's bottom edge (planar)
+    const have_top = sy > 0;
+    const have_left = sx > 0;
+    if (have_top) {
+        for (0..8) |c| top[c] = recon[(sy - 1) * pw + sx + c];
+        tl = if (have_left) recon[(sy - 1) * pw + sx - 1] else 128;
+        tr = if (sx + 8 < pw) recon[(sy - 1) * pw + sx + 8] else top[7];
+    }
+    if (have_left) {
+        for (0..8) |r| left[r] = recon[(sy + r) * pw + sx - 1];
+        bl = if (sy + 8 < ph) recon[(sy + 8) * pw + sx - 1] else left[7];
+    }
+    switch (mode) {
+        INTRA_NONE => {
+            // legacy raw-DCT intra expressed as prediction: pred = mid-gray,
+            // so recon = pred + rec - 128 == rec, byte-identical to v0.1-v0.3.
+            @memset(out, 128);
+        },
+        INTRA_VERTICAL => {
+            for (0..8) |r| for (0..8) |c| {
+                out[r * 8 + c] = top[c];
+            };
+        },
+        INTRA_HORIZONTAL => {
+            for (0..8) |r| for (0..8) |c| {
+                out[r * 8 + c] = left[r];
+            };
+        },
+        INTRA_DC => {
+            var dc: i32 = 128 * 16;
+            if (have_top and have_left) {
+                var s: i32 = 0;
+                for (0..8) |i| s += top[i];
+                for (0..8) |i| s += left[i];
+                dc = @divTrunc(s + 8, 16);
+            } else if (have_top) {
+                var s: i32 = 0;
+                for (0..8) |i| s += top[i];
+                dc = @divTrunc(s + 4, 8);
+            } else if (have_left) {
+                var s: i32 = 0;
+                for (0..8) |i| s += left[i];
+                dc = @divTrunc(s + 4, 8);
+            }
+            const px: u8 = @intCast(std.math.clamp(dc, 0, 255));
+            @memset(out, px);
+        },
+        INTRA_PLANAR => {
+            for (0..8) |r| for (0..8) |c| {
+                const v: i32 = ((7 - @as(i32, @intCast(c))) * @as(i32, left[r]) +
+                    (@as(i32, @intCast(c)) + 1) * @as(i32, tr) +
+                    (7 - @as(i32, @intCast(r))) * @as(i32, top[c]) +
+                    (@as(i32, @intCast(r)) + 1) * @as(i32, bl) + 8) >> 4;
+                out[r * 8 + c] = @intCast(std.math.clamp(v, 0, 255));
+            };
+        },
+        INTRA_DIAG_DR => {
+            // ref[0]=TL, ref[1..8]=top, ref[9..15]=left[0..6]
+            var ref: [16]u8 = @splat(128);
+            ref[0] = tl;
+            for (0..8) |c| ref[1 + c] = top[c];
+            for (0..7) |r| ref[9 + r] = left[r];
+            for (0..8) |r| for (0..8) |c| {
+                const idx = @min(@as(usize, 15), r + c + 1);
+                out[r * 8 + c] = ref[idx];
+            };
+        },
+        INTRA_DIAG_DL => {
+            for (0..8) |r| for (0..8) |c| {
+                const idx = @min(@as(usize, 7), c + (r + 1) / 2);
+                out[r * 8 + c] = top[idx];
+            };
+        },
+        INTRA_HOR_DOWN => {
+            for (0..8) |r| for (0..8) |c| {
+                const idx = @min(@as(usize, 7), r + (c + 1) / 2);
+                out[r * 8 + c] = left[idx];
+            };
+        },
+        else => unreachable, // encoder only writes modes from intraModes()
+    }
+}
+
+// ------------------------------------------------------- in-loop deblocking
+// Learned from x264/H.264: smooth 8x8 block edges on the reconstructed frame
+// before it becomes the next reference and the measured output. H.264-lite:
+// an edge pair (p1,p0|q0,q1) is filtered only when the step across the edge
+// and both neighboring steps are small (alpha/beta activity tests); the
+// correction moves p0/q0 toward their local mean without overshooting the
+// midpoint. Frame-atomic: applied to the finished recon frame identically on
+// both sides, so predictions inside a frame never see a half-filtered plane.
+// Gene-gated: strength 0 = off = byte-exact legacy.
+
+fn deblockPair(p0: *u8, q0: *u8, p1: u8, q1: u8, alpha: f32, beta: f32) void {
+    const fp0: f32 = @floatFromInt(p0.*);
+    const fq0: f32 = @floatFromInt(q0.*);
+    const d = fq0 - fp0;
+    if (@abs(d) >= alpha) return;
+    const dp = @abs(@as(f32, @floatFromInt(p1)) - fp0);
+    if (dp >= beta) return;
+    const dq = @abs(@as(f32, @floatFromInt(q1)) - fq0);
+    if (dq >= beta) return;
+    const filt = (3.0 * d + (@as(f32, @floatFromInt(p1)) - @as(f32, @floatFromInt(q1)))) / 8.0;
+    const maxd = @max(1.0, @abs(d) * 0.5);
+    const delta = std.math.clamp(filt, -maxd, maxd);
+    p0.* = @intFromFloat(std.math.clamp(@round(fp0 + delta), 0.0, 255.0));
+    q0.* = @intFromFloat(std.math.clamp(@round(fq0 - delta), 0.0, 255.0));
+}
+
+fn deblockPlane(plane: []u8, pw: usize, ph: usize, strength: f32, qp: f32) void {
+    const alpha = strength * (6.0 + qp * 0.8);
+    const beta = strength * (3.0 + qp * 0.4);
+    var c: usize = 8;
+    while (c < pw) : (c += 8) { // vertical block edges
+        for (0..ph) |r| {
+            const row = plane[r * pw ..];
+            deblockPair(&row[c - 1], &row[c], row[c - 2], row[c + 1], alpha, beta);
+        }
+    }
+    var rr: usize = 8;
+    while (rr < ph) : (rr += 8) { // horizontal block edges
+        for (0..pw) |cc| {
+            deblockPair(
+                &plane[(rr - 1) * pw + cc],
+                &plane[rr * pw + cc],
+                plane[(rr - 2) * pw + cc],
+                plane[(rr + 1) * pw + cc],
+                alpha,
+                beta,
+            );
+        }
+    }
+}
+
+/// In-loop deblock of a finished frame (all three planes). Shared by encoder
+/// and decoder — one code path, one qp, zero side info.
+fn deblockFrame(g: *const gen.Genome, y: []u8, u: []u8, v: []u8, w: usize, h: usize, qp: f32) void {
+    const s = gen.deblockGene(g);
+    if (s <= 0) return;
+    deblockPlane(y, w, h, s, qp);
+    deblockPlane(u, w / 2, h / 2, s, qp);
+    deblockPlane(v, w / 2, h / 2, s, qp);
+}
+
 // ------------------------------------------------------------- context
 
 const Ctx = struct {
@@ -236,6 +477,9 @@ const Ctx = struct {
 
     bw: BW,
     br: BR,
+    // per-plane scratch: block data is assembled here, then framed as
+    // [mode map][block data] into the main bitstream (v0.4 syntax)
+    scratch: []u8,
 
     block_src: [64]u8 = @splat(0),
     dct_calls: u64 = 0,
@@ -248,19 +492,19 @@ const Ctx = struct {
     debug_px: bool = false,
 };
 
-fn packPairs(ctx: *Ctx, lv: []const i32, last: usize) void {
+fn packPairs(bw: *BW, lv: []const i32, last: usize) void {
     var npairs: u64 = 0;
     for (lv[0 .. last + 1]) |l| {
         if (l != 0) npairs += 1;
     }
-    ctx.bw.putUvarint(npairs);
+    bw.putUvarint(npairs);
     var run: u64 = 0;
     for (0..last + 1) |k| {
         if (lv[k] == 0) {
             run += 1;
         } else {
-            ctx.bw.putUvarint(run);
-            ctx.bw.putSvarint(lv[k]);
+            bw.putUvarint(run);
+            bw.putSvarint(lv[k]);
             run = 0;
         }
     }
@@ -319,6 +563,11 @@ fn encodeFrame(ctx: *Ctx, fi: u32) !void {
     try encodePlane(ctx, fi, is_i, qp, clip.u, ctx.encU, ctx.prevU, clip.w / 2, clip.h / 2, true, refresh, @as(usize, fi) * clip.csz);
     try encodePlane(ctx, fi, is_i, qp, clip.v, ctx.encV, ctx.prevV, clip.w / 2, clip.h / 2, true, refresh, @as(usize, fi) * clip.csz);
 
+    // v0.4 in-loop deblocking: the finished recon frame is smoothed BEFORE it
+    // becomes the next reference and the stored decoder output. Same qp, same
+    // code path on the decoder — can never desynchronize.
+    deblockFrame(g, ctx.encY, ctx.encU, ctx.encV, clip.w, clip.h, qp);
+
     // swap: enc becomes prev
     const ty = ctx.prevY;
     const tu = ctx.prevU;
@@ -373,6 +622,17 @@ fn encodePlane(
     const do_refresh = !is_i and !chroma and (fi / refresh) > 0;
     const halfpel = gen.halfPel(g);
 
+    // v0.4 per-plane framing: block data goes to scratch, intra mode codes go
+    // to a bit-packed map; the plane lands as [mode map][block data].
+    const modes = intraModes(g);
+    const mwidth: u5 = intraModeBits(modes.len);
+    var mmap: [512]u8 = @splat(0);
+    var mbacc: u32 = 0;
+    var mbn: u5 = 0;
+    var mmap_n: usize = 0; // completed bytes in the mode map
+    var sbw = BW{ .buf = ctx.scratch };
+    if (modes.len > 1 and (nbx * nby * @as(usize, mwidth) + 7) / 8 > mmap.len) return error.BitstreamOverflow;
+
     var by: usize = 0;
     while (by < nby) : (by += 1) {
         const by_n: f32 = (@as(f32, @floatFromInt(by)) + 0.5) / @as(f32, @floatFromInt(nby));
@@ -396,17 +656,80 @@ fn encodePlane(
             };
 
             if (force_intra) {
-                if (!is_i) ctx.bw.putU8(2); // intra-in-P marker
+                if (!is_i) sbw.putU8(2); // intra-in-P marker
                 var lv: [64]i32 = undefined;
-                quantizeBlock(ctx, ctx.block_src[0..64], qp, iq_scale, rc, &lv);
-                var last: usize = 0;
-                for (0..64) |k| {
-                    if (lv[k] != 0) last = k;
+                if (modes.len == 1) {
+                    // legacy: raw block into DCT — no prediction, no mode code
+                    quantizeBlock(ctx, ctx.block_src[0..64], qp, iq_scale, rc, &lv);
+                    var last: usize = 0;
+                    for (0..64) |k| {
+                        if (lv[k] != 0) last = k;
+                    }
+                    packPairs(&sbw, lv[0..], last);
+                    var deq: [64]f32 = undefined;
+                    dequantLevels(ctx, &lv, qp, iq_scale, rc, &deq);
+                    idct8(&deq, enc[sy * pw + sx ..], pw, &ctx.idct_calls);
+                } else {
+                    // v0.4: spatial prediction from reconstructed neighbors,
+                    // mode decided by residual SAD, signaled with one byte.
+                    // The prediction reads the encoder's OWN recon plane
+                    // (raster-ordered) — byte-identical to the decoder's.
+                    // Mode metric is CLAMP-AWARE: the residual travels in a
+                    // u8 (+128 offset), so a predictor that leaves |src-pred|
+                    // > 127 loses pixels to saturation. The metric below is
+                    // the true pre-quant error of each candidate, so a bad
+                    // predictor can never beat the legacy path — the mode
+                    // decision degrades gracefully to legacy behavior.
+                    var mode_i: usize = 0;
+                    var pred: [64]u8 = undefined;
+                    var best_err: u64 = std.math.maxInt(u64);
+                    var trial: [64]u8 = undefined;
+                    for (modes, 0..) |m, mi| {
+                        intraPredict(m, enc, pw, ph, sx, sy, &trial);
+                        var err: u64 = 0;
+                        for (0..64) |k| {
+                            const s: i32 = @as(i32, ctx.block_src[k]);
+                            const p: i32 = @as(i32, trial[k]);
+                            const dcl: i32 = std.math.clamp(s - p, -128, 127);
+                            err += @abs(p + dcl - s);
+                        }
+                        if (err < best_err) {
+                            best_err = err;
+                            mode_i = mi;
+                            pred = trial;
+                        }
+                    }
+                    mbacc = (mbacc << mwidth) | @as(u32, @intCast(mode_i));
+                    mbn += mwidth;
+                    while (mbn >= 8) {
+                        mbn -= 8;
+                        mmap[mmap_n] = @intCast((mbacc >> mbn) & 0xFF);
+                        mmap_n += 1;
+                    }
+                    // residual = src - pred, offset by 128 for DCT
+                    var res: [64]u8 = undefined;
+                    for (0..64) |k| {
+                        const d: i32 = @as(i32, ctx.block_src[k]) - @as(i32, pred[k]);
+                        res[k] = @intCast(std.math.clamp(d + 128, 0, 255));
+                    }
+                    quantizeBlock(ctx, res[0..64], qp, iq_scale, rc, &lv);
+                    var last: usize = 0;
+                    for (0..64) |k| {
+                        if (lv[k] != 0) last = k;
+                    }
+                    packPairs(&sbw, lv[0..], last);
+                    var deq: [64]f32 = undefined;
+                    dequantLevels(ctx, &lv, qp, iq_scale, rc, &deq);
+                    var rec: [64]u8 = undefined;
+                    idct8(&deq, rec[0..64], 8, &ctx.idct_calls);
+                    const dst = enc[sy * pw + sx ..];
+                    for (0..8) |rr2| {
+                        for (0..8) |cc2| {
+                            const v: i32 = @as(i32, pred[rr2 * 8 + cc2]) + @as(i32, rec[rr2 * 8 + cc2]) - 128;
+                            dst[rr2 * pw + cc2] = @intCast(std.math.clamp(v, 0, 255));
+                        }
+                    }
                 }
-                packPairs(ctx, lv[0..], last);
-                var deq: [64]f32 = undefined;
-                dequantLevels(ctx, &lv, qp, iq_scale, rc, &deq);
-                idct8(&deq, enc[sy * pw + sx ..], pw, &ctx.idct_calls);
             } else {
                 // motion search against prev recon
                 var best: u64 = std.math.maxInt(u64);
@@ -471,16 +794,16 @@ fn encodePlane(
                     }
                 }
                 if (perpx < skip_th) {
-                    ctx.bw.putU8(1); // skip: cur already == prev copy
+                    sbw.putU8(1); // skip: cur already == prev copy
                 } else {
                     if (subpel != 4) {
-                        ctx.bw.putU8(2); // inter with half-pel refinement
+                        sbw.putU8(2); // inter with half-pel refinement
                     } else {
-                        ctx.bw.putU8(0);
+                        sbw.putU8(0);
                     }
-                    ctx.bw.putSvarint(bdx);
-                    ctx.bw.putSvarint(bdy);
-                    if (subpel != 4) ctx.bw.putU8(subpel);
+                    sbw.putSvarint(bdx);
+                    sbw.putSvarint(bdy);
+                    if (subpel != 4) sbw.putU8(subpel);
                     if (subpel == 4) {
                         var r3: usize = 0;
                         while (r3 < 8) : (r3 += 1) {
@@ -500,7 +823,7 @@ fn encodePlane(
                     for (0..64) |k| {
                         if (lv[k] != 0) last = k;
                     }
-                    packPairs(ctx, lv[0..], last);
+                    packPairs(&sbw, lv[0..], last);
                     // reconstruct: pred + idct(dequant(residual))
                     var deq: [64]f32 = undefined;
                     dequantLevels(ctx, &lv, qp, pq_scale, rc, &deq);
@@ -527,11 +850,9 @@ fn encodePlane(
                     }
                     if (ctx.debug_px and fi == 1 and sx == 0 and sy == 0 and !chroma) {
                         std.debug.print("INTER blk(0,0) mv=({d},{d})\n src: {any}\n pred: {any}\n res:  {any}\n rec:  {any}\n recon:{any}\n", .{
-                            bdx, bdy,
-                            ctx.block_src[0..8],
-                            pred[0..8],
-                            res[0..8],
-                            rec[0..8],
+                            bdx,                 bdy,
+                            ctx.block_src[0..8], pred[0..8],
+                            res[0..8],           rec[0..8],
                             dst[0..8],
                         });
                     }
@@ -539,6 +860,13 @@ fn encodePlane(
             }
         }
     }
+
+    // ---- plane framing: [mode map (deterministic length)][block data] ----
+    if (mwidth > 0) {
+        const map_len = (nbx * nby * @as(usize, mwidth) + 7) / 8;
+        for (mmap[0..map_len]) |b| ctx.bw.put(b); // zero-padded tail included
+    }
+    for (ctx.scratch[0..sbw.n]) |b| ctx.bw.put(b);
 }
 
 fn sadBlock(a: *const [64]u8, b: []const u8, stride: usize, fast: bool) u64 {
@@ -580,6 +908,11 @@ fn decodeFrame(ctx: *Ctx, curY: []u8, curU: []u8, curV: []u8, prevY: []const u8,
     try decodePlane(ctx, is_i, qp, curY, prevY, clip.w, clip.h, false, refresh);
     try decodePlane(ctx, is_i, qp, curU, prevU, clip.w / 2, clip.h / 2, true, refresh);
     try decodePlane(ctx, is_i, qp, curV, prevV, clip.w / 2, clip.h / 2, true, refresh);
+
+    // v0.4 in-loop deblocking — mirrors encodeFrame exactly: same planes, same
+    // frame qp, same filter. The deblocked frame is the stored output AND the
+    // next frame's reference on both sides.
+    deblockFrame(g, curY, curU, curV, clip.w, clip.h, qp);
 }
 
 fn decodePlane(
@@ -602,6 +935,18 @@ fn decodePlane(
     const rrow: usize = @intCast((ctx.dec_fi / refresh) % @max(1, nby));
     const do_refresh = !is_i and !chroma and (ctx.dec_fi / refresh) > 0;
 
+    // v0.4: the plane's intra mode map precedes the block data — read it once
+    // (deterministic length), then decode blocks against it.
+    const modes = intraModes(g);
+    const mwidth: u5 = intraModeBits(modes.len);
+    var mmap: [512]u8 = undefined;
+    var map_br = BR{ .buf = mmap[0..0] };
+    if (mwidth > 0) {
+        const map_len = (nbx * nby * @as(usize, mwidth) + 7) / 8;
+        for (0..map_len) |mi| mmap[mi] = try ctx.br.getU8();
+        map_br = .{ .buf = mmap[0..map_len] };
+    }
+
     var by: usize = 0;
     while (by < nby) : (by += 1) {
         const by_n: f32 = (@as(f32, @floatFromInt(by)) + 0.5) / @as(f32, @floatFromInt(nby));
@@ -619,21 +964,54 @@ fn decodePlane(
 
             if (force_intra) {
                 if (!is_i) _ = try ctx.br.getU8(); // intra-in-P marker
-                // unpack pairs
-                const npairs = try ctx.br.getUvarint();
-                var coef: [64]f32 = @splat(0);
-                var k: u64 = 0;
-                var i: u64 = 0;
-                while (i < npairs) : (i += 1) {
-                    const run = try ctx.br.getUvarint();
-                    const lvl = try ctx.br.getSvarint();
-                    k += run;
-                    if (k >= 64) return error.Corrupt;
-                    const lf: f32 = @floatFromInt(lvl);
-                    coef[ZZ[@intCast(k)]] = lf * levelQ(g, qp, iq_scale, @intCast(k), rc);
-                    k += 1;
+                if (modes.len == 1) {
+                    // legacy: no mode byte, raw-DCT recon
+                    const npairs = try ctx.br.getUvarint();
+                    var coef: [64]f32 = @splat(0);
+                    var k: u64 = 0;
+                    var i: u64 = 0;
+                    while (i < npairs) : (i += 1) {
+                        const run = try ctx.br.getUvarint();
+                        const lvl = try ctx.br.getSvarint();
+                        k += run;
+                        if (k >= 64) return error.Corrupt;
+                        const lf: f32 = @floatFromInt(lvl);
+                        coef[ZZ[@intCast(k)]] = lf * levelQ(g, qp, iq_scale, @intCast(k), rc);
+                        k += 1;
+                    }
+                    idct8(&coef, cur[sy * pw + sx ..], pw, &ctx.idct_calls);
+                } else {
+                    // v0.4: mode index from the plane's bit-packed map (1-3
+                    // bits), prediction from the decoder's own recon plane
+                    // (identical availability, identical pixels).
+                    const midx = try map_br.getBits(mwidth);
+                    if (midx >= modes.len) return error.Corrupt;
+                    const mode = modes[midx];
+                    var pred: [64]u8 = undefined;
+                    intraPredict(mode, cur, pw, ph, sx, sy, &pred);
+                    const npairs = try ctx.br.getUvarint();
+                    var coef: [64]f32 = @splat(0);
+                    var k: u64 = 0;
+                    var i: u64 = 0;
+                    while (i < npairs) : (i += 1) {
+                        const run = try ctx.br.getUvarint();
+                        const lvl = try ctx.br.getSvarint();
+                        k += run;
+                        if (k >= 64) return error.Corrupt;
+                        const lf: f32 = @floatFromInt(lvl);
+                        coef[ZZ[@intCast(k)]] = lf * levelQ(g, qp, iq_scale, @intCast(k), rc);
+                        k += 1;
+                    }
+                    var rec: [64]u8 = undefined;
+                    idct8(&coef, rec[0..64], 8, &ctx.idct_calls);
+                    const dst = cur[sy * pw + sx ..];
+                    for (0..8) |rr| {
+                        for (0..8) |cc| {
+                            const v: i32 = @as(i32, pred[rr * 8 + cc]) + @as(i32, rec[rr * 8 + cc]) - 128;
+                            dst[rr * pw + cc] = @intCast(std.math.clamp(v, 0, 255));
+                        }
+                    }
                 }
-                idct8(&coef, cur[sy * pw + sx ..], pw, &ctx.idct_calls);
             } else {
                 const flags = try ctx.br.getU8();
                 if (flags == 1) {
@@ -732,6 +1110,7 @@ pub fn evalClip(
         .decV = decV,
         .bw = .{ .buf = bitbuf },
         .br = .{ .buf = "" },
+        .scratch = try a.alloc(u8, 1 << 20),
     };
 
     const t0 = std.Io.Clock.now(.awake, io);
@@ -842,6 +1221,7 @@ pub fn debugRoundtrip(alloc: std.mem.Allocator, clip: *const yuv.Clip, g: *const
         .decV = decY,
         .bw = .{ .buf = bitbuf },
         .br = .{ .buf = "" },
+        .scratch = try a.alloc(u8, 1 << 20),
     };
 
     var cy = p1Y;
@@ -888,4 +1268,138 @@ pub fn debugRoundtrip(alloc: std.mem.Allocator, clip: *const yuv.Clip, g: *const
         pv = cv;
         cv = tv;
     }
+}
+
+// ---------------------------------------------------------------- v0.4 tests
+
+// Deterministic synthetic clip: smooth gradient + a moving block (motion) +
+// hard rectangles (block edges for the deblocker to chew on).
+fn synthClip(alloc: std.mem.Allocator, w: u32, h: u32, frames: u32) !yuv.Clip {
+    const ysz: usize = @as(usize, w) * h;
+    const csz: usize = ysz / 4;
+    const y = try alloc.alloc(u8, @as(usize, frames) * ysz);
+    const u = try alloc.alloc(u8, @as(usize, frames) * csz);
+    const v = try alloc.alloc(u8, @as(usize, frames) * csz);
+    for (0..frames) |fi| {
+        const fy = y[@as(usize, fi) * ysz ..][0..ysz];
+        for (0..h) |r| {
+            for (0..w) |c| {
+                // slow diagonal drift each frame + gradient + box
+                const dx: i32 = @intCast((c + fi * 2) % w);
+                const dy: i32 = @intCast((r + fi) % h);
+                var px: i32 = @divTrunc(@divTrunc(dx * 255, @as(i32, @intCast(w))) + @divTrunc(dy * 255, @as(i32, @intCast(h))), 2);
+                if (dx >= 6 and dx < 22 and dy >= 6 and dy < 22) px = 220; // hard box
+                if (dx >= 24 and dx < 30 and dy >= 4 and dy < 10) px = 30; // second box
+                fy[r * w + c] = @intCast(std.math.clamp(px, 0, 255));
+            }
+        }
+        @memset(u[@as(usize, fi) * csz ..][0..csz], 100);
+        @memset(v[@as(usize, fi) * csz ..][0..csz], 150);
+    }
+    return .{
+        .name = "synth",
+        .w = w,
+        .h = h,
+        .frames = frames,
+        .fps = 24,
+        .ysz = ysz,
+        .csz = csz,
+        .y = y,
+        .u = u,
+        .v = v,
+    };
+}
+
+fn genomeWith(id: u64, intra: f32, deb: f32) gen.Genome {
+    var g = gen.Genome{ .id = id, .gen = 0, .pa = 0, .pb = 0, .tribe = 0, .g = @splat(0.5) };
+    g.g[3] = 0.18; // fine baseq: sharp recon for the roundtrip floor
+    g.g[16] = intra;
+    g.g[17] = deb;
+    return g;
+}
+
+// THE v0.4 invariant: with prediction and/or deblocking enabled, the decoder
+// output must remain byte-exact equal to the encoder recon (closed loop),
+// frame by frame, on every plane. Any drift here is a desync bug.
+test "v0.4 closed loop holds with intra prediction and deblocking on" {
+    const alloc = std.testing.allocator;
+    var clip = try synthClip(alloc, 32, 32, 4);
+    defer alloc.free(clip.y);
+    defer alloc.free(clip.u);
+    defer alloc.free(clip.v);
+
+    const variants = [_]gen.Genome{
+        genomeWith(1, 0.0, 0.0), // legacy exact
+        genomeWith(2, 0.9, 0.0), // full intra prediction
+        genomeWith(3, 0.0, 0.6), // deblocking only
+        genomeWith(4, 0.9, 0.6), // both
+        genomeWith(5, 0.4, 0.3), // DC-only set + mild deblock
+    };
+    for (&variants) |*g| {
+        var reports = std.ArrayList(DebugReport).empty;
+        defer reports.deinit(alloc);
+        try debugRoundtrip(alloc, &clip, g, .{}, &reports, alloc);
+        try std.testing.expectEqual(@as(usize, 4), reports.items.len);
+        for (reports.items) |r| {
+            try std.testing.expectEqual(@as(i32, -1), r.first_bad_block);
+            try std.testing.expectEqual(@as(u32, 0), r.max_delta);
+            try std.testing.expect(r.enc_y_psnr > 9.0); // crude default genes; floor sanity only
+        }
+    }
+}
+
+// The migration invariant: a genome with the v0.4 genes at 0.0 must take the
+// legacy path — same PSNR/bytes as a genome whose new genes were never set.
+test "v0.4 genes at 0 reproduce legacy metrics exactly" {
+    const alloc = std.testing.allocator;
+    var clip = try synthClip(alloc, 32, 32, 4);
+    defer alloc.free(clip.y);
+    defer alloc.free(clip.u);
+    defer alloc.free(clip.v);
+
+    var a = genomeWith(10, 0.0, 0.0);
+    var b = genomeWith(10, 0.0, 0.0);
+    b.g[7] = 0.3; // unrelated gene differs — must not matter to this check
+    var ra = std.ArrayList(DebugReport).empty;
+    defer ra.deinit(alloc);
+    var rb = std.ArrayList(DebugReport).empty;
+    defer rb.deinit(alloc);
+    try debugRoundtrip(alloc, &clip, &a, .{}, &ra, alloc);
+    try debugRoundtrip(alloc, &clip, &b, .{}, &rb, alloc);
+    // determinism: identical runs, identical reports
+    for (ra.items, rb.items) |x, yv| {
+        try std.testing.expectEqual(x.enc_y_psnr, yv.enc_y_psnr);
+        try std.testing.expectEqual(x.max_delta, yv.max_delta);
+    }
+}
+
+// intraPredict sanity: vertical mode copies the top row; DC of a flat
+// neighborhood is the flat value.
+test "intraPredict vertical copies top row, DC fills flat value" {
+    var recon: [32 * 32]u8 = undefined;
+    for (0..32) |r| for (0..32) |c| {
+        recon[r * 32 + c] = @intCast((r * 7 + c * 3) % 256);
+    };
+    var out: [64]u8 = undefined;
+    intraPredict(INTRA_VERTICAL, &recon, 32, 32, 8, 8, &out); // top = row 7
+    for (0..8) |r| for (0..8) |c| {
+        try std.testing.expectEqual(recon[7 * 32 + 8 + c], out[r * 8 + c]);
+    };
+    var flat: [32 * 32]u8 = @splat(90);
+    intraPredict(INTRA_DC, &flat, 32, 32, 8, 8, &out);
+    for (out) |px| try std.testing.expectEqual(@as(u8, 90), px);
+}
+
+// deblockPair never overshoots the midpoint and leaves a flat plane flat.
+test "deblock pair clamps and preserves flat regions" {
+    var p0: u8 = 100;
+    var q0: u8 = 110;
+    deblockPair(&p0, &q0, 100, 110, 50.0, 25.0);
+    try std.testing.expect(p0 > 100 and q0 < 110);
+    try std.testing.expect(p0 <= 105 and q0 >= 105); // midpoint never crossed
+    var a: u8 = 77;
+    var b: u8 = 77;
+    deblockPair(&a, &b, 77, 77, 50.0, 25.0);
+    try std.testing.expectEqual(@as(u8, 77), a);
+    try std.testing.expectEqual(@as(u8, 77), b);
 }

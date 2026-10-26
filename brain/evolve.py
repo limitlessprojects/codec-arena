@@ -40,18 +40,20 @@ import subprocess
 import sys
 import time
 
-NG_EFF = 16          # effector genes (legacy layout preserved)
+NG_EFF = 18          # effector genes (legacy 16 preserved; v0.4 adds intra_pred, deblock)
 NR_REG = 6           # regulator genes (GRN v1)
-NG = NG_EFF + NR_REG # 22 total; screens/refits model 22 linear + 16^2 quad
+NG = NG_EFF + NR_REG # 24 total; screens model 24 linear + 16^2 quad over legacy effectors
 GENE_NAMES = [
-    # effectors (1..16) — g[1] and g[10] repurposed in v0.3 (were placebo)
+    # effectors (1..18) — g[1] and g[10] repurposed in v0.3 (were placebo);
+    # g[17] intra_pred and g[18] deblock added in v0.4 (x264's structural pillars)
     "keyint", "dz_dc", "search", "baseq", "q_low", "q_mid", "q_high",
     "deadzone", "skip", "p_qmul", "intra_b0", "dither", "halfpel",
-    "refresh", "adaptq", "chroma_q",
-    # regulators (17..22) — decoder-derivable context, bounded gains
+    "refresh", "adaptq", "chroma_q", "intra_pred", "deblock",
+    # regulators (19..24) — decoder-derivable context, bounded gains
     "mv_dz", "mv_q", "gop_q", "row_q", "skip_mv", "intra_gop",
 ]
 REG_DEFAULT = 0.5    # neutral regulator: gain 0, phenotype identical to v0.1
+NEW_GENE_DEFAULT = 0.0  # v0.4 migration default: gene 0.0 == exact legacy behavior
 
 
 def load_pop(path):
@@ -63,7 +65,13 @@ def load_pop(path):
                 continue
             t = line.split()
             if len(t) == 5 + 16:
-                t = t + [str(REG_DEFAULT)] * NR_REG  # v1 line: neutral regs
+                # v1 line: neutral regs + v0.4 genes at legacy 0
+                t = t + [str(REG_DEFAULT)] * NR_REG + [str(NEW_GENE_DEFAULT)] * 2
+                # order: [eff16, reg6, new2] -> flat g = eff16 + new2 + reg6
+                t = t[: 5 + 16] + t[5 + 16 + NR_REG :] + t[5 + 16 : 5 + 16 + NR_REG]
+            elif len(t) == 5 + 22:
+                # v2 line: eff16 + reg6 -> append v0.4 genes (legacy 0)
+                t = t[: 5 + 16] + [str(NEW_GENE_DEFAULT)] * 2 + t[5 + 16 :]
             if len(t) != 5 + NG:
                 continue
             pop.append({
@@ -114,10 +122,12 @@ def fitness(g, r, cfg):
 # ---- surrogate refit (per-shard adaptation; numpy optional) ----
 
 def features(genes):
-    """(22,) -> (159,): 1 | 22 linear | 136 quadratic over the 16 effectors."""
+    """24 flat genes -> (161,): 1 | 24 linear | 136 quadratic over the 16
+    LEGACY effectors (the v0.4 genes ride linear-only until a refit learns
+    them; the compact v3 model layout mirrors screen.zig exactly)."""
     v = [1.0]
     v.extend(genes)
-    for i in range(NG_EFF):
+    for i in range(16):
         for j in range(i + 1):
             v.append(genes[i] * genes[j])
     return v

@@ -22,24 +22,36 @@ const gen = @import("genome.zig");
 
 pub const Model = struct {
     w0: f32,
-    w_lin: [gen.NTOT]f32, // 22: 16 effectors + 6 regulators
-    w_quad: [256]f32, // flat 16x16 over EFFECTORS only, zeros in strict upper
+    w_lin: [gen.NTOT]f32, // 24: 18 effectors (incl. v0.4 intra_pred/deblock) + 6 regulators
+    w_quad: [256]f32, // flat 16x16 over the 16 LEGACY effectors, zeros in strict upper
 
     /// Expand the compact weight layout into the flat SIMD-friendly layout.
     /// v1: 153 = 1 + 16 linear + 136 quad (regulator weights default 0 = neutral).
     /// v2: 159 = 1 + 22 linear + 136 quad.
+    /// v3: 161 = 1 + 24 linear (16 eff + intra_pred + deblock + 6 reg) + 136 quad.
     /// Quad feature idx 17+T(i)+j maps to quad[i*16+j], T(i)=i*(i+1)/2.
     pub fn fromCompact(w: []const f32) !Model {
-        if (w.len != 153 and w.len != 159) return error.BadModel;
+        if (w.len != 153 and w.len != 159 and w.len != 161) return error.BadModel;
         var m: Model = undefined;
         m.w0 = w[0];
         @memset(&m.w_lin, 0);
         @memset(&m.w_quad, 0);
-        for (0..gen.NG) |i| m.w_lin[i] = w[1 + i];
-        if (w.len == 159) {
-            for (0..gen.NR) |i| m.w_lin[gen.NG + i] = w[1 + gen.NG + i];
+        // linear: legacy effectors always at w[1..16]; the v0.4 genes ride at
+        // flat positions 16,17 (weights 0 = neutral until a v3 refit learns them)
+        for (0..16) |i| m.w_lin[i] = w[1 + i];
+        if (w.len == 161) {
+            m.w_lin[16] = w[17]; // intra_pred
+            m.w_lin[17] = w[18]; // deblock
+            for (0..gen.NR) |i| m.w_lin[gen.NG + i] = w[19 + i];
         }
-        var idx: usize = 17 + if (w.len == 159) gen.NR else 0;
+        if (w.len == 159) {
+            for (0..gen.NR) |i| m.w_lin[16 + i] = w[17 + i];
+        }
+        var idx: usize = switch (w.len) {
+            153 => 17,
+            159 => 23,
+            else => 25,
+        };
         for (0..16) |i| {
             for (0..i + 1) |j| {
                 m.w_quad[i * 16 + j] = w[idx];
@@ -60,7 +72,7 @@ pub const Model = struct {
             const wv: @Vector(16, f32) = self.w_quad[i * 16 ..][0..16].*;
             sum += wv * row;
         }
-        // regulator linear terms (16..21)
+        // linear terms beyond the legacy effectors: v0.4 genes (16,17) + regulators
         var rsum: f32 = 0;
         for (16..gen.NTOT) |i| rsum += self.w_lin[i] * g[i];
         return @reduce(.Add, acc + sum) + rsum;
@@ -72,7 +84,7 @@ pub fn loadModel(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Model 
     const txt = try dir.readFileAlloc(io, path, alloc, .limited(1 << 20));
     var it = std.mem.tokenizeAny(u8, txt, " \t\r\n");
     const n = try std.fmt.parseInt(usize, it.next() orelse return error.BadModel, 10);
-    if (n != 153 and n != 159) return error.BadModel;
+    if (n != 153 and n != 159 and n != 161) return error.BadModel;
     const w = try alloc.alloc(f32, n);
     for (0..n) |i| {
         const tok = it.next() orelse return error.BadModel;
@@ -279,14 +291,14 @@ pub fn run(
     defer out_file.close(io);
     var buf: [512]u8 = undefined;
     for (all[0..out_n]) |s| {
-        const line = try std.fmt.bufPrint(&buf, "0 0 {d} {d} {d} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4}\n", .{
+        const line = try std.fmt.bufPrint(&buf, "0 0 {d} {d} {d} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4}\n", .{
             s.lin.pa, s.lin.pb, s.lin.tribe,
             s.g[0],   s.g[1],   s.g[2],   s.g[3],
             s.g[4],   s.g[5],   s.g[6],   s.g[7],
             s.g[8],   s.g[9],   s.g[10],  s.g[11],
             s.g[12],  s.g[13],  s.g[14],  s.g[15],
             s.g[16],  s.g[17],  s.g[18],  s.g[19],
-            s.g[20],  s.g[21],
+            s.g[20],  s.g[21],  s.g[22],  s.g[23],
         });
         try out_file.writeStreamingAll(io, line);
     }
@@ -297,7 +309,7 @@ pub fn run(
     return total;
 }
 
-test "model compact->flat layout (v1 and v2)" {
+test "model compact->flat layout (v1, v2, v3)" {
     var w1: [153]f32 = @splat(0);
     for (0..153) |i| w1[i] = @floatFromInt(i);
     const m1 = try Model.fromCompact(&w1);
@@ -319,6 +331,16 @@ test "model compact->flat layout (v1 and v2)" {
     const m2 = try Model.fromCompact(&w2);
     try std.testing.expectEqual(@as(f32, 22), m2.w_lin[21]);
     try std.testing.expectEqual(@as(f32, 23), m2.w_quad[0]);
+    // v3: 24 linear terms — flat[16]=intra_pred (w[17]), flat[17]=deblock (w[18]),
+    // regulators at w[19..24], quad starts at idx 25
+    var w3: [161]f32 = @splat(0);
+    for (0..161) |i| w3[i] = @floatFromInt(i);
+    const m3 = try Model.fromCompact(&w3);
+    try std.testing.expectEqual(@as(f32, 17), m3.w_lin[16]);
+    try std.testing.expectEqual(@as(f32, 18), m3.w_lin[17]);
+    try std.testing.expectEqual(@as(f32, 19), m3.w_lin[18]);
+    try std.testing.expectEqual(@as(f32, 24), m3.w_lin[23]);
+    try std.testing.expectEqual(@as(f32, 25), m3.w_quad[0]);
 }
 
 test "screen deterministic top-k" {
@@ -326,15 +348,25 @@ test "screen deterministic top-k" {
     w[0] = 1.0; // intercept
     w[1 + 3] = 10.0; // baseq dominates
     const m = Model.fromCompact(&w);
-    const g_a: [16]f32 = @splat(0.5);
-    var g_b: [16]f32 = @splat(0.5);
+    const g_a: [gen.NTOT]f32 = @splat(0.5);
+    var g_b: [gen.NTOT]f32 = @splat(0.5);
     g_b[3] = 0.9;
-    var elites = [_]gen.Genome{
-        .{ .id = 1, .gen = 0, .pa = 0, .pb = 0, .tribe = 1, .g = g_a },
-        .{ .id = 2, .gen = 0, .pa = 0, .pb = 0, .tribe = 2, .g = g_b },
+    const g18_a: [gen.NG]f32 = @splat(0.5);
+    const g18_b: [gen.NG]f32 = @splat(0.5);
+    const elites = [_]gen.Genome{
+        .{ .id = 1, .gen = 0, .pa = 0, .pb = 0, .tribe = 1, .g = g18_a },
+        .{ .id = 2, .gen = 0, .pa = 0, .pb = 0, .tribe = 2, .g = g18_b },
     };
-    // pure scoring sanity: higher baseq -> higher score
-    const s1 = m.score(&elites[0].g);
-    const s2 = m.score(&elites[1].g);
+    try std.testing.expectEqual(@as(usize, 2), elites.len); // Genome carries [18] effectors
+    // pure scoring sanity: higher baseq -> higher score (flat 24-vector in,
+    // exactly as the worker synthesizes them)
+    const s1 = m.score(&g_a);
+    const s2 = m.score(&g_b);
     try std.testing.expect(s2 > s1);
+    // v0.4 genes start weight-0 neutral under legacy models: flipping them
+    // must not change the score
+    var g_c: [gen.NTOT]f32 = @splat(0.5);
+    g_c[16] = 0.95;
+    g_c[17] = 0.9;
+    try std.testing.expectEqual(m.score(&g_a), m.score(&g_c));
 }

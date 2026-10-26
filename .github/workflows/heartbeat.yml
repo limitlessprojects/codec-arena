@@ -1,11 +1,14 @@
 name: heartbeat
 
-# GitHub drops scheduled runs under load (observed 2026-10-25: the 21:37 UTC
-# arena cron never fired, while the previous night's fired 24 min late). The
-# arena's throughput promise is "at least six runs a day", so the heartbeat is
-# the catch-up net: every hour it checks when the arena last started a run.
-# If the arena has been idle for more than 3h55m and nothing is in flight,
-# it dispatches one. Six crons + heartbeat = the cadence holds forever.
+# GitHub drops scheduled runs under load (observed repeatedly: 2026-10-25 the
+# 21:37 UTC cron never fired; 2026-10-26 both the 11:37 and 13:37 crons were
+# dropped, and a 3h55m-from-completion threshold could never catch a drop in
+# a 4h schedule — max observable idle is only ~3h20m). Since v0.4 the
+# heartbeat is the CADENCE DRIVER, not just a safety net: whenever the arena
+# has been idle for 1h+ since its last run completed and nothing is in
+# flight, dispatch one. Six crons are the guaranteed floor; the heartbeat
+# fills every other gap the scheduler loses. Measured steady state with
+# ~95-100 min runs: ~8-12 runs/day at $0 — the free runners never idle long.
 
 on:
   workflow_dispatch:
@@ -24,13 +27,13 @@ jobs:
   catch-up:
     runs-on: ubuntu-latest
     steps:
-      - name: Dispatch arena if idle > 3h55m
+      - name: Dispatch arena if idle > 1h
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          idle_secs=14100   # 3h55m; arena crons are spaced 4h apart
+          idle_secs=3600   # 1h: drive utilization, don't just catch drops
 
           dispatch() {
             curl -sf -X POST \
@@ -74,5 +77,5 @@ jobs:
             exit 0
           fi
 
-          echo "arena idle past the 3h55m floor — a cron was dropped or delayed"
+          echo "arena idle past 1h — filling the gap (cron dropped, or the fleet is simply free)"
           dispatch

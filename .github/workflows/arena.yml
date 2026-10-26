@@ -16,9 +16,11 @@ on:
         description: "surrogate screens per generation (0 = legacy GA path)"
         default: "2650000000"
   schedule:
-    # Six arena runs per day, 4h apart, off-peak minute (:37 — GitHub delays
-    # top-of-hour crons hardest). The heartbeat workflow is the catch-up net:
-    # if GitHub drops one of these crons, the missed run is dispatched late.
+    # Six arena runs per day at a minimum — 4h apart, off-peak minute (:37 —
+    # GitHub delays top-of-hour crons hardest). This cron is the GUARANTEED
+    # FLOOR; the heartbeat workflow is the utilization driver: whenever the
+    # arena has been idle 1h+ with nothing in flight, it dispatches another
+    # run. Together: ~8-12 runs/day at $0, and dropped crons self-heal.
     - cron: "37 1,5,9,13,17,21 * * *"
 
 permissions:

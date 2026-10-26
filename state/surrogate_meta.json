@@ -4,8 +4,8 @@
  "spearman_holdout": 0.7015,
  "spearman_all": 0.7023,
  "r2_holdout": 0.9546,
- "features": 153,
- "layout": "v2: 1 + 22 linear (6 regulator weights initialized 0 = neutral prior) + 136 quadratic over effectors",
+ "features": 161,
+ "layout": "v3: 1 + 24 linear (16 eff + intra_pred + deblock + 6 reg, v0.4 weights initialized 0 = neutral prior) + 136 quadratic over legacy effectors",
  "trained_on": [
   {
    "run": 40113226256,
