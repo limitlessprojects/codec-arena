@@ -41,24 +41,28 @@ jobs:
             echo "arena run dispatched (catch-up)"
           }
 
-          # last arena run regardless of status; tolerate transient API errors
+          # last arena run regardless of status; tolerate transient API errors.
+          # Idle is measured from the run's updated_at (completion time) when
+          # completed: a 90-min run must not burn its own idle window, or the
+          # heartbeat fires early and double-runs a slot (observed 2026-10-26
+          # 02:01 and 10:06 UTC — both landed on top of delayed crons).
           resp=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/$REPO/actions/workflows/arena.yml/runs?per_page=1" || true)
-          last=$(echo "$resp" | python3 -c "import json,sys;d=json.load(sys.stdin);r=(d.get('workflow_runs') or [None])[0];print((r['created_at'] if r else '')+' '+(r['status'] if r else 'none'))" 2>/dev/null || echo " none")
+          last=$(echo "$resp" | python3 -c "import json,sys;d=json.load(sys.stdin);r=(d.get('workflow_runs') or [None])[0];print((r['updated_at']+' '+r['status']+' '+(r['conclusion'] or 'none')) if r else 'none')" 2>/dev/null || echo "none")
 
-          last_ts_str=$(echo "$last" | awk '{print $1}')
+          last_upd=$(echo "$last" | awk '{print $1}')
           last_status=$(echo "$last" | awk '{print $2}')
 
-          if [ -z "$last_ts_str" ]; then
+          if [ "$last_upd" = "none" ] || [ -z "$last_upd" ]; then
             echo "no arena runs on record — dispatching the first"
             dispatch
             exit 0
           fi
 
           now=$(date +%s)
-          last_ts=$(date -d "$last_ts_str" +%s)
-          age=$((now - last_ts))
-          echo "last arena run: $last_ts_str (status=$last_status, age=$((age / 60))m)"
+          ref_ts=$(date -d "$last_upd" +%s)
+          age=$((now - ref_ts))
+          echo "last arena activity: $last_upd (status=$last_status, age=$((age / 60))m)"
 
           if [ "$last_status" != "completed" ]; then
             echo "a run is in flight — nothing to do"

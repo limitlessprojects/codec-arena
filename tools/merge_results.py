@@ -91,17 +91,37 @@ def main():
         json.dump(state, f, indent=1)
 
     # ---- champion (global) ----
+    # The Hall of Fame keeps the best bot EVER SEEN, not the best of this run:
+    # a regression must never dethrone the champion, and the champion-gated
+    # issue report must only fire on genuine improvements.
     report = []
+    hof_champ = None
     if champs:
         def fits(c):
             return c.get("metrics", {}).get("psnr", 0) - 14.0 * c.get("metrics", {}).get("bpp", 99)
-        champ = max(champs, key=fits)
-        os.makedirs(os.path.join(repo, "halloffame"), exist_ok=True)
-        with open(os.path.join(repo, "halloffame", "champion.json"), "w") as f:
-            json.dump(champ, f, indent=1)
-        m = champ["metrics"]
-        report.append(f"champion: bot {champ['id']} (gen {champ['gen']}, tribe {champ['tribe']}) "
-                      f"psnr={m['psnr']:.2f} bpp={m['bpp']:.4f}")
+        cand = max(champs, key=fits)
+        hof_p = os.path.join(repo, "halloffame", "champion.json")
+        prev = None
+        if os.path.exists(hof_p):
+            try:
+                with open(hof_p) as f:
+                    prev = json.load(f)
+            except Exception:
+                prev = None
+        if prev is None or fits(cand) > fits(prev):
+            os.makedirs(os.path.dirname(hof_p), exist_ok=True)
+            with open(hof_p, "w") as f:
+                json.dump(cand, f, indent=1)
+            hof_champ = cand
+            m = cand["metrics"]
+            report.append(f"champion: bot {cand['id']} (gen {cand['gen']}, tribe {cand['tribe']}) "
+                          f"psnr={m['psnr']:.2f} bpp={m['bpp']:.4f}")
+        else:
+            hof_champ = prev
+            m = prev["metrics"]
+            report.append(f"champion retained: bot {prev['id']} "
+                          f"psnr={m['psnr']:.2f} bpp={m['bpp']:.4f} "
+                          f"(this run's best, bot {cand['id']}, did not beat it)")
 
     # ---- LEADERBOARD.md ----
     lb = ["# Leaderboard", "",
@@ -131,8 +151,8 @@ def main():
             lb.append(f"| {c['shard']} | {c['id']} | {c['gen']} | {c['tribe']} | "
                       f"{m['psnr']:.2f} | {m['bpp']:.4f} |")
         lb.append("")
-        if base and base.get("target_psnr") and champs:
-            c = max(champs, key=fits)
+        if base and base.get("target_psnr") and hof_champ is not None:
+            c = hof_champ
             m = c["metrics"]
             lb.append(f"Champion vs the x264 bar ({base['target_psnr']} dB): "
                       f"champion {m['psnr']:.2f} dB @ {m['bpp']:.4f} bpp — "

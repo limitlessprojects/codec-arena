@@ -143,16 +143,25 @@ jobs:
           python3 tools/merge_results.py --in-dir stage
           echo "evals=$(python3 -c "import json;print(json.load(open('state/lifetime_evals.json'))['lifetime_evals'])")" >> "$GITHUB_OUTPUT"
           echo "search=$(python3 -c "import json;print(json.load(open('state/lifetime_evals.json'))['search_evals'])")" >> "$GITHUB_OUTPUT"
-      - name: Commit state (race-safe push)
+      - name: Commit state (conflict-proof merge-and-push)
         run: |
           git config user.name "codec-arena-bot"
           git config user.email "arena@limitlessprojects.dev"
-          git add LEADERBOARD.md LESSONS.md state/ halloffame/ benchmarks/ 2>/dev/null || true
-          git commit -m "arena: run ${{ github.run_id }} — oracle ${{ steps.merge.outputs.evals }}, search ${{ steps.merge.outputs.search }} [skip ci]" || echo "nothing to commit"
           ok=""
           for i in 1 2 3 4 5 6; do
-            if git pull --rebase origin main && git push; then ok=1; break; fi
-            echo "attempt $i lost the push race; backing off"
+            # Merge always computes from FRESH origin state: if another run
+            # pushed counters meanwhile, they are preserved and ours
+            # accumulate on top (merge_results adds deltas). A rebase
+            # conflict is structurally impossible.
+            git fetch origin main
+            git reset --hard origin/main
+            python3 tools/merge_results.py --in-dir stage
+            EV=$(python3 -c "import json;print(json.load(open('state/lifetime_evals.json'))['lifetime_evals'])")
+            SE=$(python3 -c "import json;print(json.load(open('state/lifetime_evals.json'))['search_evals'])")
+            git add LEADERBOARD.md LESSONS.md state/ halloffame/ benchmarks/ 2>/dev/null || true
+            git commit -m "arena: run ${{ github.run_id }} — oracle $EV, search $SE [skip ci]" || echo "nothing to commit"
+            if git push; then ok=1; break; fi
+            echo "attempt $i lost the push race; re-merging on fresh origin"
             sleep $((10 + i * 10))
           done
           if [ -z "$ok" ]; then
@@ -173,11 +182,13 @@ jobs:
             exit 0
           fi
           echo "NEW CHAMPION bot $new_id — posting report"
+          EV=$(python3 -c "import json;print(json.load(open('state/lifetime_evals.json'))['lifetime_evals'])")
+          SE=$(python3 -c "import json;print(json.load(open('state/lifetime_evals.json'))['search_evals'])")
           {
             echo "## New Global Champion — bot $new_id (run ${{ github.run_id }})"
             echo ""
-            echo "Oracle evaluations: **${{ steps.merge.outputs.evals }}**"
-            echo "Candidate evaluations (all instruments): **${{ steps.merge.outputs.search }}**"
+            echo "Oracle evaluations: **$EV**"
+            echo "Candidate evaluations (all instruments): **$SE**"
             echo ""
             echo '```'
             tail -40 LEADERBOARD.md
