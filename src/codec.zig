@@ -208,7 +208,7 @@ const CX_MARK_B: usize = 1; // block marker: intra (vs inter)?
 const CX_MV_SIGN: usize = 2;
 const CX_MV_U0: usize = 3; // MV magnitude unary (>0,>1,>2)
 const CX_MV_B0: usize = 6; // MV magnitude raw 4 bits (mag-3)
-const CX_SP_B0: usize = 10; // half-pel code, raw 4 bits
+const CX_SP_B0: usize = 10; // subpel code: 4 bits legacy half | 5 bits v0.5b quarter
 const CX_NP_U0: usize = 14; // npairs unary (>0..>3)
 const CX_NP_B0: usize = 18; // npairs raw 6 bits (np-4)
 const CX_RN_U0: usize = 22; // run unary (>0..>3)
@@ -451,8 +451,9 @@ fn BlockW(comptime ac_on: bool) type {
                 self.bw.putSvarint(dy);
             }
         }
-        fn subpel(self: *@This(), code: u8) void {
-            if (ac_on) encUBits(&self.ac, &self.ps, CX_SP_B0, 4, code) else self.bw.putU8(code);
+        fn subpel(self: *@This(), code: u8, bits: u4) void {
+            // v0.5b: 4 bits legacy (half-pel 3x3) | 5 bits qpel (5x5 lattice)
+            if (ac_on) encUBits(&self.ac, &self.ps, CX_SP_B0, bits, code) else self.bw.putU8(code);
         }
         fn levels(self: *@This(), lv: []const i32, last: usize) void {
             if (ac_on) acEncLevels(&self.ac, &self.ps, lv, last) else packPairs(&self.bw, lv, last);
@@ -492,8 +493,8 @@ fn BlockR(comptime ac_on: bool) type {
             const cdy = std.math.cast(i32, dy) orelse return error.Corrupt;
             return .{ cdx, cdy };
         }
-        fn subpel(self: *@This()) !u8 {
-            if (ac_on) return @intCast(try decUBits(&self.ac, &self.ps, CX_SP_B0, 4));
+        fn subpel(self: *@This(), bits: u4) !u8 {
+            if (ac_on) return @intCast(try decUBits(&self.ac, &self.ps, CX_SP_B0, bits));
             return try self.br.getU8();
         }
         /// Legacy twin: read (npairs, pairs) and fill the dequantized coef array.
@@ -611,6 +612,196 @@ fn interpBlock(prev: []const u8, pw: usize, ph: usize, ox: i32, oy: i32, hx: i32
             const v = @divTrunc(a * (2 - xf) * (2 - yf) + b * xf * (2 - yf) +
                 c2 * (2 - xf) * yf + d * xf * yf + 2, 4);
             out[r * 8 + c] = @intCast(v);
+        }
+    }
+}
+
+// --------------------------------------------------- quarter-pel MC (v0.5b)
+// Learned from the AV1 lineup (switchable interpolation filters; the 4-tap
+// Wiener regular filter) structured like H.264's MC: Wiener-filtered halves,
+// bilinear quarters. The 5x5 quarter lattice around an integer MV:
+//   half positions  (qx,qy in {-2,0,2}): 4-tap Wiener (-1,9,9,-1)>>4,
+//     diagonal halves = vertical 4-tap of the horizontal half plane
+//     (canonical order, like H.264's j from b).
+//   quarter positions (any |qx| or |qy| == 1): rounded bilinear average of
+//     the bracketing integer/half samples on the finer grid:
+//     1D quarters = avg(int, half); diagonal quarters =
+//     avg(int, halfH, halfV, halfD) (2D bilinear of the four corners).
+// Edge-clamped throughout; shared by encoder search/recon and decoder
+// reconstruction — identical on both sides by construction.
+// Gene-gated (g[21]): off = byte-exact v0.5 (bilinear half-pel only).
+
+/// 4-tap Wiener half sample between pos and pos+1 along one axis.
+/// taps (-1, 9, 9, -1), rounded >>4, CLAMPED to [0,255] (x264-style: the
+/// clamp is part of the one canonical definition shared by the direct path
+/// and the cached half-planes, so both are bit-identical).
+inline fn halfT4(p0: i32, p1: i32, p2: i32, p3: i32) i32 {
+    return @max(0, @min(255, @divTrunc(-p0 + 9 * p1 + 9 * p2 - p3 + 8, 16)));
+}
+
+fn atClamp(prev: []const u8, pw: usize, ph: usize, x: i32, y: i32) i32 {
+    const xi = @max(0, @min(@as(i32, @intCast(pw)) - 1, x));
+    const yi = @max(0, @min(@as(i32, @intCast(ph)) - 1, y));
+    return @as(i32, prev[@as(usize, @intCast(yi)) * pw + @as(usize, @intCast(xi))]);
+}
+
+fn clamp255(v: i32) u8 {
+    return @intCast(@max(0, @min(255, v)));
+}
+
+/// Horizontal half sample at (x + 1/2, y).
+inline fn halfH(prev: []const u8, pw: usize, ph: usize, x: i32, y: i32) i32 {
+    return halfT4(atClamp(prev, pw, ph, x - 1, y), atClamp(prev, pw, ph, x, y),
+        atClamp(prev, pw, ph, x + 1, y), atClamp(prev, pw, ph, x + 2, y));
+}
+/// Vertical half sample at (x, y + 1/2).
+inline fn halfV(prev: []const u8, pw: usize, ph: usize, x: i32, y: i32) i32 {
+    return halfT4(atClamp(prev, pw, ph, x, y - 1), atClamp(prev, pw, ph, x, y),
+        atClamp(prev, pw, ph, x, y + 1), atClamp(prev, pw, ph, x, y + 2));
+}
+/// Diagonal half sample at (x + 1/2, y + 1/2): vertical 4-tap of the
+/// horizontal half plane (canonical order, identical enc/dec).
+inline fn halfD(prev: []const u8, pw: usize, ph: usize, x: i32, y: i32) i32 {
+    return halfT4(halfH(prev, pw, ph, x, y - 1), halfH(prev, pw, ph, x, y),
+        halfH(prev, pw, ph, x, y + 1), halfH(prev, pw, ph, x, y + 2));
+}
+
+/// Quarter-pel prediction block: samples the reference at
+/// (ox + qx/4, oy + qy/4), qx/qy in {-2,-1,0,1,2}. DIRECT path — recomputes
+/// the 4-tap filters per pixel. Used as the reference definition; the
+/// production path is mcBlockQ on prebuilt half-planes (same values by
+/// construction, and the cross-check test asserts that).
+fn interpBlockQ(prev: []const u8, pw: usize, ph: usize, ox: i32, oy: i32, qx: i32, qy: i32, out: *[64]u8) void {
+    for (0..8) |r| {
+        for (0..8) |c| {
+            const x: i32 = ox + @as(i32, @intCast(c));
+            const y: i32 = oy + @as(i32, @intCast(r));
+            // absolute quarter offsets from the integer grid point (x,y)
+            const ax = qx; // in {-2..2}
+            const ay = qy;
+            var v: i32 = undefined;
+            if (ax == 0 and ay == 0) {
+                v = atClamp(prev, pw, ph, x, y);
+            } else if (ay == 0 and @abs(ax) == 2) {
+                // horizontal half: sample at x + ax/4 (divFloor: -2 -> -1)
+                v = halfH(prev, pw, ph, x + @divFloor(ax, 4), y);
+            } else if (ax == 0 and @abs(ay) == 2) {
+                v = halfV(prev, pw, ph, x, y + @divFloor(ay, 4));
+            } else if (@abs(ax) == 2 and @abs(ay) == 2) {
+                v = halfD(prev, pw, ph, x + @divFloor(ax, 4), y + @divFloor(ay, 4));
+            } else if (ay == 0) {
+                // 1D horizontal quarter: avg(int, neighboring half)
+                if (ax == -1) {
+                    v = @divTrunc(atClamp(prev, pw, ph, x, y) + halfH(prev, pw, ph, x - 1, y) + 1, 2);
+                } else {
+                    v = @divTrunc(atClamp(prev, pw, ph, x, y) + halfH(prev, pw, ph, x, y) + 1, 2);
+                }
+            } else if (ax == 0) {
+                if (ay == -1) {
+                    v = @divTrunc(atClamp(prev, pw, ph, x, y) + halfV(prev, pw, ph, x, y - 1) + 1, 2);
+                } else {
+                    v = @divTrunc(atClamp(prev, pw, ph, x, y) + halfV(prev, pw, ph, x, y) + 1, 2);
+                }
+            } else {
+                // diagonal quarter: 2D bilinear of the four grid corners
+                // (int, halfH, halfV, halfD) around the quarter point.
+                const sx = if (ax < 0) @as(i32, -1) else @as(i32, 0);
+                const sy = if (ay < 0) @as(i32, -1) else @as(i32, 0);
+                const ic = atClamp(prev, pw, ph, x, y);
+                const hh = halfH(prev, pw, ph, x + sx, y);
+                const vv = halfV(prev, pw, ph, x, y + sy);
+                const dd = halfD(prev, pw, ph, x + sx, y + sy);
+                v = @divTrunc(ic + hh + vv + dd + 2, 4);
+            }
+            out[r * 8 + c] = clamp255(v);
+        }
+    }
+}
+
+// --- v0.5b production path: prebuilt half-planes (the libaom/SVT-AV1
+// "interpolated reference buffer" pattern). Building the three half planes
+// once per reference plane turns per-block sub-pel refinement into plain
+// reads — the difference between +267% and a few dozen percent encode cost.
+
+/// Build the three half-pel planes for one reference plane. hH/hV/hD are
+/// pw*ph u8 buffers. halfD is the vertical 4-tap of the hH plane (canonical
+/// order, H.264's j-from-b structure). Edge-clamped at build time; all
+/// production reads go through these planes (encoder AND decoder), so the
+/// closed loop cannot desync.
+fn buildHalfPlanes(prev: []const u8, pw: usize, ph: usize, hH: []u8, hV: []u8, hD: []u8) void {
+    for (0..ph) |y| {
+        for (0..pw) |x| {
+            hH[y * pw + x] = @intCast(halfH(prev, pw, ph, @intCast(x), @intCast(y)));
+        }
+    }
+    for (0..ph) |y| {
+        for (0..pw) |x| {
+            hV[y * pw + x] = @intCast(halfV(prev, pw, ph, @intCast(x), @intCast(y)));
+        }
+    }
+    for (0..ph) |y| {
+        for (0..pw) |x| {
+            const ym: usize = if (y == 0) 0 else y - 1;
+            const yp: usize = @min(ph - 1, y + 1);
+            const y2: usize = @min(ph - 1, y + 2);
+            hD[y * pw + x] = @intCast(halfT4(
+                @as(i32, hH[ym * pw + x]),
+                @as(i32, hH[y * pw + x]),
+                @as(i32, hH[yp * pw + x]),
+                @as(i32, hH[y2 * pw + x]),
+            ));
+        }
+    }
+}
+
+/// Clamp helper for plane reads (plane boundaries already clamp at build
+/// time; reads only clamp index range).
+inline fn atPlane(p: []const u8, pw: usize, ph: usize, x: i32, y: i32) i32 {
+    const xi = @max(0, @min(@as(i32, @intCast(pw)) - 1, x));
+    const yi = @max(0, @min(@as(i32, @intCast(ph)) - 1, y));
+    return @as(i32, p[@as(usize, @intCast(yi)) * pw + @as(usize, @intCast(xi))]);
+}
+
+/// Quarter-pel prediction from prebuilt half-planes. Same semantics as
+/// interpBlockQ, byte-identical values (both clamp halves identically).
+fn mcBlockQ(prev: []const u8, hH: []const u8, hV: []const u8, hD: []const u8, pw: usize, ph: usize, ox: i32, oy: i32, qx: i32, qy: i32, out: *[64]u8) void {
+    for (0..8) |r| {
+        for (0..8) |c| {
+            const x: i32 = ox + @as(i32, @intCast(c));
+            const y: i32 = oy + @as(i32, @intCast(r));
+            const ax = qx;
+            const ay = qy;
+            var v: i32 = undefined;
+            if (ax == 0 and ay == 0) {
+                v = atClamp(prev, pw, ph, x, y);
+            } else if (ay == 0 and @abs(ax) == 2) {
+                v = atPlane(hH, pw, ph, x + @divFloor(ax, 4), y);
+            } else if (ax == 0 and @abs(ay) == 2) {
+                v = atPlane(hV, pw, ph, x, y + @divFloor(ay, 4));
+            } else if (@abs(ax) == 2 and @abs(ay) == 2) {
+                v = atPlane(hD, pw, ph, x + @divFloor(ax, 4), y + @divFloor(ay, 4));
+            } else if (ay == 0) {
+                if (ax == -1) {
+                    v = @divTrunc(atClamp(prev, pw, ph, x, y) + atPlane(hH, pw, ph, x - 1, y) + 1, 2);
+                } else {
+                    v = @divTrunc(atClamp(prev, pw, ph, x, y) + atPlane(hH, pw, ph, x, y) + 1, 2);
+                }
+            } else if (ax == 0) {
+                if (ay == -1) {
+                    v = @divTrunc(atClamp(prev, pw, ph, x, y) + atPlane(hV, pw, ph, x, y - 1) + 1, 2);
+                } else {
+                    v = @divTrunc(atClamp(prev, pw, ph, x, y) + atPlane(hV, pw, ph, x, y) + 1, 2);
+                }
+            } else {
+                const sx = if (ax < 0) @as(i32, -1) else @as(i32, 0);
+                const sy = if (ay < 0) @as(i32, -1) else @as(i32, 0);
+                const ic = atClamp(prev, pw, ph, x, y);
+                const hh = atPlane(hH, pw, ph, x + sx, y);
+                const vv = atPlane(hV, pw, ph, x, y + sy);
+                const dd = atPlane(hD, pw, ph, x + sx, y + sy);
+                v = @divTrunc(ic + hh + vv + dd + 2, 4);
+            }
+            out[r * 8 + c] = clamp255(v);
         }
     }
 }
@@ -1017,6 +1208,11 @@ const Ctx = struct {
     scratch: []u8,
     // CDEF snapshot buffer (max plane size; frame-atomic filtering)
     cdef_buf: []u8,
+    // v0.5b half-pel MC planes (max plane size; rebuilt per reference plane
+    // when the qpel gene is on — the interpolated reference buffer)
+    mcH: []u8,
+    mcV: []u8,
+    mcD: []u8,
 
     block_src: [64]u8 = @splat(0),
     dct_calls: u64 = 0,
@@ -1186,6 +1382,13 @@ fn encodePlaneT(
     const rrow: usize = @intCast((fi / refresh) % @max(1, nby));
     const do_refresh = !is_i and !chroma and (fi / refresh) > 0;
     const halfpel = gen.halfPel(g);
+    // v0.5b: build the half-pel planes ONCE per reference plane when the qpel
+    // gene is on and this plane can contain inter blocks. Production MC reads
+    // the planes (mcBlockQ); the direct interpBlockQ is test-reference only.
+    const qpel = gen.qpelOn(g);
+    if (qpel and !is_i) {
+        buildHalfPlanes(prev, pw, ph, ctx.mcH, ctx.mcV, ctx.mcD);
+    }
     // CFL reads the co-located luma recon — pre-deblock on BOTH sides.
     const cfl_luma: ?[]const u8 = if (chroma) ctx.encY else null;
     const cfl_lpw: usize = ctx.clip.w;
@@ -1331,12 +1534,68 @@ fn encodePlaneT(
                 rc.mv_n = @min(1.0, (@as(f32, @floatFromInt(@abs(bdx))) + @as(f32, @floatFromInt(@abs(bdy)))) / 8.0);
                 // R4 (skip_mv): skip threshold scales with motion (encoder-side)
                 const skip_th = gen.regSkipTh(g, rc, gen.skipTh(g));
-                var subpel: u8 = 4; // (hx+1)*3+(hy+1); 4 = integer-pel center
+                // v0.5b: qpel rides beside halfpel. When on, it SUPERSEDES the
+                // bilinear half path: 4-tap Wiener halves + bilinear quarters,
+                // code (qx+2)*5+(qy+2) in 5 bits (12 = integer center).
+                const qpel_on = qpel;
+                const sp_center: u8 = if (qpel_on) 12 else 4;
+                const sp_bits: u4 = if (qpel_on) 5 else 4;
+                var subpel: u8 = sp_center;
                 var pred: [64]u8 = undefined;
                 const ox_i: i32 = @intCast(@as(i32, @intCast(sx)) + bdx);
                 const oy_i: i32 = @intCast(@as(i32, @intCast(sy)) + bdy);
-                if (halfpel) {
-                    // half-pel refinement around the integer MV
+                if (qpel_on) {
+                    // two-stage refinement: 8 half positions (4-tap), then the
+                    // 8 quarter neighbors of the winner (half re-tests excluded)
+                    var hb: u64 = best;
+                    var bqx: i32 = 0;
+                    var bqy: i32 = 0;
+                    var hp: [64]u8 = undefined;
+                    var qy2: i32 = -2;
+                    while (qy2 <= 2) : (qy2 += 2) {
+                        var qx2: i32 = -2;
+                        while (qx2 <= 2) : (qx2 += 2) {
+                            if (qx2 == 0 and qy2 == 0) continue;
+                            mcBlockQ(prev, ctx.mcH, ctx.mcV, ctx.mcD, pw, ph, ox_i, oy_i, qx2, qy2, &hp);
+                            const s2 = sadBlock(ctx.block_src[0..64], &hp, 8, ctx.opts.fast_sad);
+                            if (s2 < hb) {
+                                hb = s2;
+                                bqx = qx2;
+                                bqy = qy2;
+                            }
+                        }
+                    }
+                    var qy3: i32 = -1;
+                    while (qy3 <= 1) : (qy3 += 1) {
+                        var qx3: i32 = -1;
+                        while (qx3 <= 1) : (qx3 += 1) {
+                            if (qx3 == 0 and qy3 == 0) continue;
+                            // cost gate: if no half-pel beat the integer MV,
+                            // skip the pure-quarter ring around center (the
+                            // block gains little from sub-pel; saves 8 evals
+                            // on exactly the blocks where it never pays).
+                            if (bqx == 0 and bqy == 0) break;
+                            const cx = bqx + qx3;
+                            const cy = bqy + qy3;
+                            if (@abs(cx) > 2 or @abs(cy) > 2) continue;
+                            if (@abs(cx) != 1 and @abs(cy) != 1) continue; // halves already tested
+                            mcBlockQ(prev, ctx.mcH, ctx.mcV, ctx.mcD, pw, ph, ox_i, oy_i, cx, cy, &hp);
+                            const s2 = sadBlock(ctx.block_src[0..64], &hp, 8, ctx.opts.fast_sad);
+                            if (s2 < hb) {
+                                hb = s2;
+                                bqx = cx;
+                                bqy = cy;
+                            }
+                        }
+                    }
+                    if (bqx != 0 or bqy != 0) {
+                        subpel = @intCast((bqx + 2) * 5 + (bqy + 2));
+                        best = hb;
+                        mcBlockQ(prev, ctx.mcH, ctx.mcV, ctx.mcD, pw, ph, ox_i, oy_i, bqx, bqy, &pred);
+                    }
+                } else if (halfpel) {
+                    // half-pel refinement around the integer MV (v0.5 legacy:
+                    // bilinear; byte-exact when the qpel gene is off)
                     var hb: u64 = best;
                     var bhx: i32 = 0;
                     var bhy: i32 = 0;
@@ -1364,14 +1623,14 @@ fn encodePlaneT(
                 if (perpx < skip_th) {
                     w.marker(1); // skip: cur already == prev copy
                 } else {
-                    if (subpel != 4) {
-                        w.marker(2); // inter with half-pel refinement
+                    if (subpel != sp_center) {
+                        w.marker(2); // inter with sub-pel refinement
                     } else {
                         w.marker(0);
                     }
                     w.mv(bdx, bdy);
-                    if (subpel != 4) w.subpel(subpel);
-                    if (subpel == 4) {
+                    if (subpel != sp_center) w.subpel(subpel, sp_bits);
+                    if (subpel == sp_center) {
                         var r3: usize = 0;
                         while (r3 < 8) : (r3 += 1) {
                             const prow = prev[@as(usize, @intCast(oy_i + @as(i32, @intCast(r3)))) * pw + @as(usize, @intCast(ox_i)) ..][0..8];
@@ -1523,6 +1782,12 @@ fn decodePlaneT(
     const nby: usize = ph / 8;
     const rrow: usize = @intCast((ctx.dec_fi / refresh) % @max(1, nby));
     const do_refresh = !is_i and !chroma and (ctx.dec_fi / refresh) > 0;
+    // v0.5b: decoder mirrors the encoder's half-plane build (same reference
+    // plane, same deterministic filter — cannot desync).
+    const qpel = gen.qpelOn(g);
+    if (qpel and !is_i) {
+        buildHalfPlanes(prev, pw, ph, ctx.mcH, ctx.mcV, ctx.mcD);
+    }
     // CFL reads the co-located luma recon — pre-deblock on BOTH sides.
     const cfl_luma: ?[]const u8 = if (chroma) ctx.dec_cur_y else null;
     const cfl_lpw: usize = ctx.clip.w;
@@ -1598,10 +1863,20 @@ fn decodePlaneT(
                     const oy_i: i32 = @as(i32, @intCast(sy)) + @as(i32, @intCast(dy));
                     var pred: [64]u8 = undefined;
                     if (flags == 2) {
-                        const code = try r.subpel();
-                        const hx = @as(i32, code / 3) - 1;
-                        const hy = @as(i32, code % 3) - 1;
-                        interpBlock(prev, pw, ph, ox_i, oy_i, hx, hy, &pred);
+                        if (gen.qpelOn(g)) {
+                            // v0.5b: 5-bit quarter lattice code (qx+2)*5+(qy+2)
+                            const code = try r.subpel(5);
+                            if (code >= 25) return error.Corrupt;
+                            const qx = @as(i32, code / 5) - 2;
+                            const qy = @as(i32, code % 5) - 2;
+                            mcBlockQ(prev, ctx.mcH, ctx.mcV, ctx.mcD, pw, ph, ox_i, oy_i, qx, qy, &pred);
+                        } else {
+                            const code = try r.subpel(4);
+                            if (code >= 9) return error.Corrupt;
+                            const hx = @as(i32, code / 3) - 1;
+                            const hy = @as(i32, code % 3) - 1;
+                            interpBlock(prev, pw, ph, ox_i, oy_i, hx, hy, &pred);
+                        }
                     } else {
                         var r2: usize = 0;
                         while (r2 < 8) : (r2 += 1) {
@@ -1675,6 +1950,9 @@ pub fn evalClip(
         .br = .{ .buf = "" },
         .scratch = try a.alloc(u8, 1 << 20),
         .cdef_buf = try a.alloc(u8, clip.ysz),
+        .mcH = try a.alloc(u8, clip.ysz),
+        .mcV = try a.alloc(u8, clip.ysz),
+        .mcD = try a.alloc(u8, clip.ysz),
     };
 
     const t0 = std.Io.Clock.now(.awake, io);
@@ -1787,6 +2065,9 @@ pub fn debugRoundtrip(alloc: std.mem.Allocator, clip: *const yuv.Clip, g: *const
         .br = .{ .buf = "" },
         .scratch = try a.alloc(u8, 1 << 20),
         .cdef_buf = try a.alloc(u8, clip.ysz),
+        .mcH = try a.alloc(u8, clip.ysz),
+        .mcV = try a.alloc(u8, clip.ysz),
+        .mcD = try a.alloc(u8, clip.ysz),
     };
 
     var cy = p1Y;
@@ -1891,6 +2172,12 @@ fn genomeWithV5(id: u64, intra: f32, deb: f32, entropy: f32, cfl: f32, cdef: f32
     return g;
 }
 
+fn genomeWithV5b(id: u64, intra: f32, deb: f32, entropy: f32, cfl: f32, cdef: f32, qpel: f32) gen.Genome {
+    var g = genomeWithV5(id, intra, deb, entropy, cfl, cdef);
+    g.g[21] = qpel;
+    return g;
+}
+
 // THE v0.4 invariant: with prediction and/or deblocking enabled, the decoder
 // output must remain byte-exact equal to the encoder recon (closed loop),
 // frame by frame, on every plane. Any drift here is a desync bug.
@@ -1975,6 +2262,87 @@ test "v0.5 genes at 0 reproduce v0.4 metrics exactly" {
     }
 }
 
+// THE v0.5b invariant: quarter-pel MC must hold the closed loop
+// (enc recon == dec output, byte-exact) across its operating envelope —
+// qpel-only, qpel+AC, qpel+halfpel gene (qpel supersedes), and all-on.
+test "v0.5b closed loop holds with quarter-pel MC on" {
+    const alloc = std.testing.allocator;
+    var clip = try synthClip(alloc, 64, 64, 4);
+    defer alloc.free(clip.y);
+    defer alloc.free(clip.u);
+    defer alloc.free(clip.v);
+
+    const variants = [_]gen.Genome{
+        genomeWithV5b(31, 0.95, 0.6, 0.0, 0.0, 0.0, 1.0), // qpel only
+        genomeWithV5b(32, 0.95, 0.6, 1.0, 0.0, 0.0, 1.0), // qpel + AC stream
+        genomeWithV5b(33, 0.95, 0.6, 1.0, 1.0, 1.0, 1.0), // everything on
+        genomeWithV5b(34, 0.95, 0.0, 1.0, 1.0, 1.0, 1.0), // qpel + AC, deblock off
+        genomeWithV5b(35, 0.30, 0.6, 1.0, 1.0, 0.0, 0.8), // legacy intra + qpel
+    };
+    for (&variants) |*g| {
+        var reports = std.ArrayList(DebugReport).empty;
+        defer reports.deinit(alloc);
+        try debugRoundtrip(alloc, &clip, g, .{}, &reports, alloc);
+        try std.testing.expectEqual(@as(usize, 4), reports.items.len);
+        for (reports.items) |r| {
+            try std.testing.expectEqual(@as(i32, -1), r.first_bad_block);
+            try std.testing.expectEqual(@as(u32, 0), r.max_delta);
+            try std.testing.expect(r.enc_y_psnr > 9.0);
+        }
+    }
+}
+
+// The v0.5b migration invariant: v0.5 genomes (qpel at 0) measure byte-exactly
+// the same with the v0.5b binary — the fitness floor stays comparable.
+test "v0.5b qpel gene at 0 reproduces v0.5 metrics exactly" {
+    const alloc = std.testing.allocator;
+    var clip = try synthClip(alloc, 32, 32, 4);
+    defer alloc.free(clip.y);
+    defer alloc.free(clip.u);
+    defer alloc.free(clip.v);
+
+    var a = genomeWithV5(11, 0.9, 0.6, 1.0, 1.0, 1.0);
+    var b = genomeWithV5b(11, 0.9, 0.6, 1.0, 1.0, 1.0, 0.0);
+    var ra = std.ArrayList(DebugReport).empty;
+    defer ra.deinit(alloc);
+    var rb = std.ArrayList(DebugReport).empty;
+    defer rb.deinit(alloc);
+    try debugRoundtrip(alloc, &clip, &a, .{}, &ra, alloc);
+    try debugRoundtrip(alloc, &clip, &b, .{}, &rb, alloc);
+    for (ra.items, rb.items) |x, yv| {
+        try std.testing.expectEqual(x.enc_y_psnr, yv.enc_y_psnr);
+        try std.testing.expectEqual(x.max_delta, yv.max_delta);
+    }
+}
+
+// interpBlockQ geometry: integer position = integer copy; a half position
+// on a flat plane is the flat value; quarter positions stay in [0,255] and
+// bracket the integer sample on a ramp (monotone, no overshoot).
+test "interpBlockQ geometry: flat, ramp, bounds" {
+    var plane: [40 * 40]u8 = @splat(100);
+    var out: [64]u8 = undefined;
+    // integer == copy
+    interpBlockQ(&plane, 40, 40, 8, 8, 0, 0, &out);
+    for (out) |px| try std.testing.expectEqual(@as(u8, 100), px);
+    // every half/quarter position on a flat plane is the flat value
+    const offs = [_][2]i32{ .{ -2, -2 }, .{ -2, 0 }, .{ -2, 2 }, .{ 0, -2 }, .{ 0, 2 }, .{ 2, -2 }, .{ 2, 0 }, .{ 2, 2 }, .{ -1, -1 }, .{ -1, 0 }, .{ -1, 1 }, .{ 0, -1 }, .{ 0, 1 }, .{ 1, -1 }, .{ 1, 0 }, .{ 1, 1 } };
+    for (offs) |o| {
+        interpBlockQ(&plane, 40, 40, 8, 8, o[0], o[1], &out);
+        for (out) |px| try std.testing.expectEqual(@as(u8, 100), px);
+    }
+    // horizontal ramp: half sample at +2 must sit strictly between the two
+    // integer samples (4-tap Wiener on a linear ramp is the ramp value)
+    var ramp: [40 * 40]u8 = undefined;
+    for (0..40) |r| for (0..40) |c| {
+        ramp[r * 40 + c] = @intCast(50 + c * 2);
+    };
+    interpBlockQ(&ramp, 40, 40, 8, 8, 2, 0, &out);
+    for (0..8) |r| for (0..8) |c| {
+        const want: u8 = @intCast(50 + (8 + c) * 2 + 1); // midpoint of the ramp step
+        try std.testing.expectEqual(want, out[r * 8 + c]);
+    };
+}
+
 // The AC engine: byte-exact roundtrip of the full symbol alphabet under
 // adversarial probability drift — markers, MVs, subpel codes, (run,level)
 // pairs, escapes. Any asymmetry between ACEnc and ACDec shows here.
@@ -2008,9 +2376,17 @@ test "adaptive entropy coder roundtrips symbol streams byte-exactly" {
             encMV(&ac, &ps, dx);
             encMV(&ac, &ps, dy);
             if (m == 2 and i % 3 == 0) {
-                const code: u8 = @intCast(rnd.uintLessThan(u4, 9));
-                ref_sub[i] = code;
-                encUBits(&ac, &ps, CX_SP_B0, 4, code);
+                // v0.5b: exercise both subpel widths — 4-bit legacy half codes
+                // and 5-bit quarter codes, index-drifted identically both sides
+                if (i % 6 == 0) {
+                    const code: u8 = @intCast(rnd.uintLessThan(u4, 9));
+                    ref_sub[i] = code;
+                    encUBits(&ac, &ps, CX_SP_B0, 4, code);
+                } else {
+                    const code: u8 = @intCast(rnd.uintLessThan(u8, 25));
+                    ref_sub[i] = code;
+                    encUBits(&ac, &ps, CX_SP_B0, 5, code);
+                }
             }
         }
         // a level every other iteration (levels 1..8, plus one big escape)
@@ -2046,7 +2422,8 @@ test "adaptive entropy coder roundtrips symbol streams byte-exactly" {
             try std.testing.expectEqual(ref_dx[i], dx);
             try std.testing.expectEqual(ref_dy[i], dy);
             if (m == 2 and i % 3 == 0) {
-                const code = try decUBits(&dec, &ps2, CX_SP_B0, 4);
+                const bits: u5 = if (i % 6 == 0) 4 else 5;
+                const code = try decUBits(&dec, &ps2, CX_SP_B0, bits);
                 try std.testing.expectEqual(ref_sub[i], @as(u8, @intCast(code)));
             }
         }

@@ -166,7 +166,7 @@ jobs:
             python3 tools/merge_results.py --in-dir stage
             EV=$(python3 -c "import json;print(json.load(open('state/lifetime_evals.json'))['lifetime_evals'])")
             SE=$(python3 -c "import json;print(json.load(open('state/lifetime_evals.json'))['search_evals'])")
-            git add LEADERBOARD.md LESSONS.md state/ halloffame/ benchmarks/ 2>/dev/null || true
+            git add LEADERBOARD.md LESSONS.md state/ halloffame/ benchmarks/ pop/ 2>/dev/null || true
             git commit -m "arena: run ${{ github.run_id }} — oracle $EV, search $SE [skip ci]" || echo "nothing to commit"
             if git push; then ok=1; break; fi
             echo "attempt $i lost the push race; re-merging on fresh origin"
@@ -182,7 +182,9 @@ jobs:
           echo "prev_champ=$PREV_CHAMP" >> "$GITHUB_OUTPUT"
           echo "new_champ=$NEW_CHAMP" >> "$GITHUB_OUTPUT"
       - name: Champion report (issue only when a new global champion is crowned)
-        if: github.event_name == 'schedule'
+        # v0.5b fix: fires on EVERY event. The old schedule-only gate was
+        # written when crons were the only driver; heartbeat dispatches now
+        # carry most runs, and two crownings went silent on dispatch events.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -194,10 +196,17 @@ jobs:
             exit 0
           fi
           echo "NEW CHAMPION bot $new_id — posting report"
+          # Self-heal the label (a missing label made `gh issue create` fail
+          # silently behind `|| true` — the bug that kept crownings quiet).
+          gh label create arena-report --color B60105 \
+            --description "arena crowning + milestone reports (bot-posted)" --force 2>/dev/null || true
           EV=$(python3 -c "import json;print(json.load(open('state/lifetime_evals.json'))['lifetime_evals'])")
           SE=$(python3 -c "import json;print(json.load(open('state/lifetime_evals.json'))['search_evals'])")
+          C=$(python3 -c "import json;d=json.load(open('halloffame/champion.json'));m=d['metrics'];print(f\"PSNR **{m['psnr']} dB @ {m['bpp']} bpp**, fitness {d['fit']:.4f}, shard {d['shard']}, gen {d['gen']}\")")
           {
             echo "## New Global Champion — bot $new_id (run ${{ github.run_id }})"
+            echo ""
+            echo "$C"
             echo ""
             echo "Oracle evaluations: **$EV**"
             echo "Candidate evaluations (all instruments): **$SE**"
@@ -212,4 +221,8 @@ jobs:
             echo '```'
           } > report.md
           gh issue create --title "New Global Champion — bot $new_id (run ${{ github.run_id }})" \
-             --body-file report.md --label arena-report || true
+             --body-file report.md --label arena-report \
+             || echo "::warning::champion issue creation failed — state is already committed, counters safe"
+          # Also close the loop for dispatch-run crownings that predate this fix:
+          # the gate now compares ids captured BEFORE the merge (prev) against
+          # the freshly landed champion (new) on every event.

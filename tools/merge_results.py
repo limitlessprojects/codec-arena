@@ -15,6 +15,7 @@ import argparse
 import glob
 import json
 import os
+import sys
 
 
 def main():
@@ -192,6 +193,28 @@ def main():
                     sigs = ", ".join(f"{k} {'+' if v > 0 else ''}{v}" for k, v in top)
                     f.write(f"- gen {l.get('gen')} shard {l.get('shard')} "
                             f"(fit {l.get('best_fit')}): {sigs}\n")
+
+    # ---- champion warm-start reseeding (v0.5b ops) ----
+    # Every run used to re-walk from the same static v3-era seed file; shards
+    # whose deterministic RNG path landed in a bad basin (shard 2: 24.98 dB @
+    # 0.4694 bpp vs the pack at 26.3-27.1) stayed stuck forever. Rebuild
+    # pop/seed.txt from the standing champion (jittered lineage tribes) plus
+    # the classic archetypes so every run INHERITS the champion's basin.
+    try:
+        import subprocess as _sp
+        hof_p = os.path.join(repo, "halloffame", "champion.json")
+        seed_p = os.path.join(repo, "pop", "seed.txt")
+        if os.path.exists(hof_p):
+            os.makedirs(os.path.dirname(seed_p), exist_ok=True)
+            r = _sp.run([sys.executable, os.path.join(repo, "tools", "gen_seed.py"),
+                         "--champion", hof_p, "--out", seed_p],
+                        capture_output=True, text=True)
+            if r.returncode == 0:
+                print(f"seed rewarmed: {r.stdout.strip()}")
+            else:
+                print(f"WARNING: seed rewarm failed rc={r.returncode}: {r.stderr.strip()[-200:]}")
+    except Exception as e:
+        print(f"WARNING: seed rewarm skipped: {e}")
 
     for line in report:
         print(line)

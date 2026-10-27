@@ -80,13 +80,30 @@ not the architect, decides where they pay.
 
 ## Next rungs in order of expected leverage
 
-1. **v0.5b — quarter-pel MC** (4-tap interpolation, gene-gated beside
-   `halfpel`).
-2. **v0.6 — RD-guided intra/inter decisions** (lambda-weighted rate+distortion
+0. **v0.5b — quarter-pel MC — SHIPPED** (4-tap Wiener interpolation,
+   gene-gated beside `halfpel`). The AV1-lineup pattern: Wiener-filtered
+   halves (`-1,9,9,-1 >> 4`, clamped — x264 convention), bilinear quarters,
+   diagonal halves = vertical 4-tap of the horizontal half plane (H.264's
+   j-from-b canonical order). 5x5 quarter lattice, 5-bit subpel code
+   (code = (qx+2)*5+(qy+2), 12 = integer center). Production MC reads
+   prebuilt half-planes (the libaom/SVT-AV1 interpolated-reference-buffer
+   pattern) — per-pixel filtering cost went +267% -> +39% with the cache,
+   and a stage-2 cost gate (skip the quarter ring when no half-pel beat the
+   integer MV) bought back another ~20% while IMPROVING RD slightly.
+   Measured at the champion operating point (29.67 dB @ 0.2113 bpp):
+   qpel-on = +0.07 dB for +0.0088 bpp -> -0.053 fitness. Strictly-safe
+   (gene 0.0 byte-exact, champion determinism verified) — selection decides.
+   Also shipped in this rung: **champion warm-start seeding** — every run
+   used to re-walk from the same static v3-era seed; shards whose
+   deterministic RNG path landed in a bad basin (shard 2: 24.98 dB @ 0.4694
+   bpp vs the pack at 26.3-27.1) stayed stuck forever. merge now rebuilds
+   pop/seed.txt as 6 jittered champion-lineage tribes (sigma 0.02..0.22) +
+   archetypes + explorers; the basin is inherited, not re-discovered.
+1. **v0.6 — RD-guided intra/inter decisions** (lambda-weighted rate+distortion
    using the arena's own exchange rate).
-3. **v0.6b — context refinement**: band-split level contexts (DC / low / high
+2. **v0.6b — context refinement**: band-split level contexts (DC / low / high
    bands), intra/inter context split — cheap bits on top of the AC engine.
-4. **v0.7 — partitions and larger transforms** (block-size tree, 16x16 intra
+3. **v0.7 — partitions and larger transforms** (block-size tree, 16x16 intra
    transform).
 
 Each rung ships with: byte-exact legacy at gene 0.0, closed-loop roundtrip

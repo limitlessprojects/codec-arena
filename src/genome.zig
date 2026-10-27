@@ -11,9 +11,9 @@
 // map of its gene with gain bounded to ±0.25, neutral at gene = 0.5.
 // A 0.01 mutation changes output by at most ~0.5% of the modulated quantity.
 
-pub const NG: usize = 21; // effectors (legacy 16 preserved; v0.4 adds 2, v0.5 adds 3)
+pub const NG: usize = 22; // effectors (legacy 16 preserved; v0.4 +2, v0.5 +3, v0.5b +1)
 pub const NR: usize = 6; // regulators
-pub const NTOT: usize = NG + NR; // 27
+pub const NTOT: usize = NG + NR; // 28
 
 // v0.4 structural genes (learned from the best of the best — x264's two
 // structural pillars). Migration invariant: gene 0.0 == EXACT legacy
@@ -47,6 +47,18 @@ pub fn cflGene(g: *const Genome) f32 {
 pub fn cdefGene(g: *const Genome) f32 {
     return clamp01(g.g[20]);
 }
+// v0.5b structural gene (learned from the AV1 lineup's switchable
+// interpolation + H.264's Wiener-half/bilinear-quarter MC). Same migration
+// invariant: gene 0.0 == exact v0.5 behavior, byte-for-byte.
+/// g[21]: quarter-pel motion compensation. >0.5 enables the 5x5 quarter-pel
+///   lattice with 4-tap Wiener half-pel filtering (and supersedes the
+///   bilinear half-pel path); <=0.5 = legacy v0.5 MC (bilinear half-pel only).
+pub fn qpelGene(g: *const Genome) f32 {
+    return clamp01(g.g[21]);
+}
+pub fn qpelOn(g: *const Genome) bool {
+    return g.g[21] > 0.5;
+}
 
 const std = @import("std");
 
@@ -66,7 +78,7 @@ pub const GeneNames = [_][]const u8{
     "skip",       "p_qmul",  "intra_b0", "dither",
     "halfpel",    "refresh", "adaptq",   "chroma_q",
     "intra_pred", "deblock",
-    "entropy",    "cfl",     "cdef",
+    "entropy",    "cfl",     "cdef",     "qpel",
 };
 pub const RegNames = [_][]const u8{
     "mv_dz", // deadzone scales with motion magnitude   (encoder-side)
@@ -84,17 +96,18 @@ pub const NEW_GENE_LEGACY: f32 = 0.0; // migration default: exact legacy behavio
 ///   v2: id gen pa pb tribe g0..g15 r0..r5           (27 tokens)
 ///   v3: id gen pa pb tribe g0..g17 r0..r5           (29 tokens)
 ///   v4: id gen pa pb tribe g0..g20 r0..r5           (32 tokens)
-/// v1/v2/v3 lines migrate with the newer genes at 0.0 = exact legacy behavior.
+///   v5: id gen pa pb tribe g0..g21 r0..r5           (33 tokens; v0.5b qpel)
+/// v1/v2/v3/v4 lines migrate with the newer genes at 0.0 = exact legacy behavior.
 pub fn parseLine(line: []const u8) !?Genome {
     var it = std.mem.tokenizeAny(u8, line, " \t\r");
-    var tok: [32][]const u8 = undefined;
+    var tok: [33][]const u8 = undefined;
     var n: usize = 0;
     while (it.next()) |t| {
-        if (n >= 32) return error.BadLine;
+        if (n >= 33) return error.BadLine;
         tok[n] = t;
         n += 1;
     }
-    if (n != 21 and n != 27 and n != 29 and n != 32) return null;
+    if (n != 21 and n != 27 and n != 29 and n != 32 and n != 33) return null;
     if (tok[0].len > 0 and tok[0][0] == '#') return null;
     var gm = Genome{
         .id = try std.fmt.parseInt(u64, tok[0], 10),
@@ -107,14 +120,14 @@ pub fn parseLine(line: []const u8) !?Genome {
     for (0..16) |i| {
         gm.g[i] = try std.fmt.parseFloat(f32, tok[5 + i]); // legacy effectors: fixed slots
     }
-    if (n == 29 or n == 32) {
+    if (n == 29 or n == 32 or n == 33) {
         gm.g[16] = try std.fmt.parseFloat(f32, tok[21]); // v0.4: intra_pred
         gm.g[17] = try std.fmt.parseFloat(f32, tok[22]); // v0.4: deblock
     } else {
         gm.g[16] = NEW_GENE_LEGACY; // migration: exact legacy behavior
         gm.g[17] = NEW_GENE_LEGACY;
     }
-    if (n == 32) {
+    if (n == 32 or n == 33) {
         gm.g[18] = try std.fmt.parseFloat(f32, tok[23]); // v0.5: entropy
         gm.g[19] = try std.fmt.parseFloat(f32, tok[24]); // v0.5: cfl
         gm.g[20] = try std.fmt.parseFloat(f32, tok[25]); // v0.5: cdef
@@ -122,6 +135,11 @@ pub fn parseLine(line: []const u8) !?Genome {
         gm.g[18] = NEW_GENE_LEGACY;
         gm.g[19] = NEW_GENE_LEGACY;
         gm.g[20] = NEW_GENE_LEGACY;
+    }
+    if (n == 33) {
+        gm.g[21] = try std.fmt.parseFloat(f32, tok[26]); // v0.5b: qpel
+    } else {
+        gm.g[21] = NEW_GENE_LEGACY;
     }
     if (n == 27) {
         for (0..NR) |i| {
@@ -135,13 +153,17 @@ pub fn parseLine(line: []const u8) !?Genome {
         for (0..NR) |i| {
             gm.reg[i] = try std.fmt.parseFloat(f32, tok[26 + i]);
         }
+    } else if (n == 33) {
+        for (0..NR) |i| {
+            gm.reg[i] = try std.fmt.parseFloat(f32, tok[27 + i]);
+        }
     } else {
         for (0..NR) |i| gm.reg[i] = 0.5; // v1: neutral regulators
     }
     return gm;
 }
 
-/// Emit a v4 pop-file line (32 tokens).
+/// Emit a v5 pop-file line (33 tokens).
 pub fn formatLine(g: *const Genome, buf: []u8) ![]const u8 {
     var fbs = std.io.fixedBufferStream(buf);
     const w = fbs.writer();
@@ -305,7 +327,25 @@ test "parse and format v4 lines round-trip all 21 effectors" {
     var ntok: usize = 0;
     var it = std.mem.tokenizeAny(u8, line, " ");
     while (it.next()) |_| ntok += 1;
-    try std.testing.expectEqual(@as(usize, 32), ntok);
+    // formatLine emits the full v5 width (22 eff + 6 reg); a v4-era line
+    // round-trips through migration (g[21] qpel reads back as written).
+    try std.testing.expectEqual(@as(usize, 33), ntok);
+}
+
+test "v4 line migrates qpel to legacy 0.0; v5 line round-trips" {
+    // v4: 21 effectors + 6 regs, no qpel slot
+    const v4 = "9 1 2 3 4 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.5";
+    const m4 = (try parseLine(v4)).?;
+    try std.testing.expectEqual(@as(f32, 0.0), m4.g[21]); // qpel legacy = exact v0.5 MC
+    try std.testing.expect(!qpelOn(&m4));
+    // v5: qpel on
+    var buf: [128]u8 = undefined;
+    var g5 = Genome{ .id = 10, .gen = 2, .pa = 0, .pb = 0, .tribe = 1, .g = @splat(0.3) };
+    g5.g[21] = 0.9;
+    const line = try formatLine(&g5, &buf);
+    const back = (try parseLine(line)).?;
+    try std.testing.expectEqual(@as(f32, 0.9), back.g[21]);
+    try std.testing.expect(qpelOn(&back));
 }
 
 // The legacy test asserted an 8-or-16 block size gene that was never wired
