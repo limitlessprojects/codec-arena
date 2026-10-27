@@ -42,5 +42,7 @@
   "worst_gene": "keyint",
   "worst_delta": -2.2023,
   "polish_gain": 0.0014
- }
+ },
+ "fit_merge": 19.1702,
+ "fit_shard": 15.9397
 }
