@@ -2126,3 +2126,152 @@ Nothing here is hand-written; nothing here is deleted.
 - gen 17 shard 9 (fit 15.68): refresh +0.085
 - gen 22 shard 9 (fit 15.832): refresh +0.093
 - gen 27 shard 9 (fit 15.905): refresh +0.113
+
+## Merge run 15
+
+- gen 25 shard 2 (fit 16.742): refresh +0.091
+- gen 0 shard 3 (fit 9.657): keyint -0.515, search -0.258, refresh -0.252, adaptq -0.194, deblock +0.172
+- gen 1 shard 3 (fit 12.123): keyint -0.295, baseq +0.144, intra_pred -0.121, dz_dc -0.119, q_high +0.104
+- gen 2 shard 3 (fit 12.104): intra_pred -0.182, baseq +0.176, chroma_q +0.126, q_low +0.104, intra_b0 +0.084
+- gen 3 shard 3 (fit 12.707): chroma_q +0.141, intra_b0 +0.135, deadzone +0.132, q_mid +0.117, deblock -0.111
+- gen 4 shard 3 (fit 13.333): skip +0.154, chroma_q +0.12, intra_b0 +0.113, q_high +0.112, deadzone +0.109
+- gen 5 shard 3 (fit 13.912): skip +0.393, intra_b0 -0.219, p_qmul +0.208, halfpel -0.152, q_low +0.119
+- gen 6 shard 3 (fit 14.054): skip +0.288, intra_b0 -0.163, p_qmul +0.155
+- gen 7 shard 3 (fit 14.261): intra_b0 -0.169, deadzone +0.134, skip +0.117, p_qmul +0.097, deblock -0.088
+- gen 8 shard 3 (fit 14.473): intra_b0 -0.14, deblock -0.089
+- gen 9 shard 3 (fit 14.677): q_mid +0.136, q_low +0.106
+- gen 10 shard 3 (fit 14.638): q_mid +0.096
+- gen 11 shard 3 (fit 14.719): dz_dc -0.091
+- gen 12 shard 3 (fit 14.774): dz_dc -0.11, chroma_q +0.086
+- gen 13 shard 3 (fit 14.824): refresh +0.1
+- gen 14 shard 3 (fit 14.871): refresh +0.157
+- gen 19 shard 3 (fit 14.999): refresh +0.091
+- gen 21 shard 3 (fit 15.065): refresh +0.084
+- gen 24 shard 3 (fit 15.099): adaptq -0.116
+- gen 25 shard 3 (fit 15.124): refresh +0.103, adaptq -0.088
+- gen 0 shard 4 (fit 9.664): keyint -0.338, search -0.202, baseq +0.198, q_high +0.169, adaptq -0.151
+- gen 1 shard 4 (fit 11.517): keyint -0.344, baseq +0.196, adaptq +0.174, intra_pred -0.121, dither +0.118
+- gen 2 shard 4 (fit 12.044): intra_pred -0.164, keyint -0.16, chroma_q +0.158, baseq +0.139, intra_b0 +0.137
+- gen 3 shard 4 (fit 12.074): deadzone +0.178, intra_b0 +0.166, intra_pred -0.15, chroma_q +0.139, deblock -0.127
+- gen 4 shard 4 (fit 13.465): chroma_q +0.193, deadzone +0.138, p_qmul +0.138, dz_dc -0.128, refresh -0.107
+- gen 5 shard 4 (fit 13.667): skip +0.144, halfpel -0.134, p_qmul +0.132, chroma_q +0.107, dz_dc -0.098
+- gen 6 shard 4 (fit 14.005): skip +0.298, dz_dc -0.237, halfpel -0.169, p_qmul +0.144, refresh +0.129
+- gen 7 shard 4 (fit 14.046): skip +0.36, p_qmul +0.191, halfpel -0.173, dz_dc -0.151, intra_b0 -0.105
+- gen 8 shard 4 (fit 14.264): intra_b0 -0.198, skip +0.131, dither +0.104, dz_dc -0.081
+- gen 9 shard 4 (fit 14.358): intra_b0 -0.229, deadzone +0.121, q_high +0.102, adaptq +0.085
+- gen 10 shard 4 (fit 14.51): intra_b0 -0.201
+- gen 12 shard 4 (fit 14.728): refresh -0.082
+- gen 13 shard 4 (fit 14.761): refresh -0.101, chroma_q +0.089
+- gen 15 shard 4 (fit 14.875): dz_dc -0.157
+- gen 16 shard 4 (fit 14.926): dz_dc -0.171
+- gen 17 shard 4 (fit 14.957): dz_dc -0.092
+- gen 18 shard 4 (fit 14.964): halfpel +0.109
+- gen 19 shard 4 (fit 14.965): refresh +0.081
+- gen 20 shard 4 (fit 15.025): dither -0.094
+- gen 21 shard 4 (fit 15.051): dither -0.087
+- gen 22 shard 4 (fit 15.061): halfpel +0.106, adaptq -0.085
+- gen 24 shard 4 (fit 15.057): refresh +0.108
+- gen 25 shard 4 (fit 15.07): refresh +0.102
+- gen 0 shard 5 (fit 9.643): keyint -0.372, refresh -0.239, search -0.177, baseq +0.173, adaptq -0.162
+- gen 1 shard 5 (fit 12.451): keyint -0.311, baseq +0.219, adaptq +0.134, skip +0.095, dither +0.086
+- gen 2 shard 5 (fit 13.326): intra_pred -0.21, baseq +0.187, intra_b0 +0.139, q_mid +0.127, p_qmul +0.115
+- gen 3 shard 5 (fit 13.793): q_low +0.229, skip +0.159, refresh +0.146, chroma_q +0.129, deadzone +0.099
+- gen 4 shard 5 (fit 13.332): skip +0.255, deadzone +0.159, intra_b0 -0.116, q_low +0.111, halfpel -0.11
+- gen 5 shard 5 (fit 13.828): skip +0.23, intra_b0 -0.213, halfpel -0.17, deblock -0.135, p_qmul +0.122
+- gen 6 shard 5 (fit 14.0): intra_b0 -0.218, skip +0.159, q_mid +0.097, deadzone +0.083
+- gen 7 shard 5 (fit 14.304): intra_b0 -0.169, q_mid +0.134, q_low +0.092
+- gen 8 shard 5 (fit 14.498): deblock -0.088
+- gen 9 shard 5 (fit 14.554): adaptq +0.135, dz_dc -0.096, dither -0.089, q_mid +0.081, refresh +0.08
+- gen 10 shard 5 (fit 14.669): adaptq +0.108, deadzone +0.093, refresh +0.081
+- gen 11 shard 5 (fit 14.677): adaptq +0.094
+- gen 12 shard 5 (fit 14.78): dither -0.123
+- gen 13 shard 5 (fit 14.792): dz_dc -0.175
+- gen 14 shard 5 (fit 14.941): dz_dc -0.168, halfpel -0.096
+- gen 15 shard 5 (fit 14.913): dz_dc -0.124, halfpel -0.099
+- gen 16 shard 5 (fit 14.96): dz_dc -0.085
+- gen 24 shard 5 (fit 15.162): dither -0.097
+- gen 25 shard 5 (fit 15.162): halfpel +0.111
+- gen 27 shard 5 (fit 15.194): dither -0.125
+- gen 0 shard 6 (fit 9.648): keyint -0.436, refresh -0.224, adaptq -0.164, search -0.136, baseq +0.134
+- gen 1 shard 6 (fit 11.667): keyint -0.302, baseq +0.171, deadzone +0.119, intra_pred -0.119, p_qmul -0.11
+- gen 2 shard 6 (fit 11.952): intra_b0 +0.245, intra_pred -0.2, adaptq +0.183, deblock -0.171, p_qmul +0.137
+- gen 3 shard 6 (fit 12.115): intra_b0 +0.263, p_qmul +0.183, chroma_q +0.156, intra_pred -0.124, q_high +0.118
+- gen 4 shard 6 (fit 12.912): q_mid +0.13, chroma_q +0.11, adaptq +0.107, halfpel +0.096
+- gen 5 shard 6 (fit 12.996): dz_dc -0.111, deadzone +0.092
+- gen 6 shard 6 (fit 13.008): dz_dc -0.169, intra_b0 -0.115
+- gen 7 shard 6 (fit 13.462): skip +0.205, p_qmul +0.151, intra_b0 -0.14, adaptq -0.123, q_mid -0.09
+- gen 8 shard 6 (fit 13.556): skip +0.271, halfpel -0.268, p_qmul +0.194, q_mid -0.168, dz_dc +0.163
+- gen 9 shard 6 (fit 13.98): intra_b0 -0.242, halfpel -0.213, skip +0.208, dz_dc +0.115, search -0.099
+- gen 10 shard 6 (fit 14.252): intra_b0 -0.304, skip +0.092
+- gen 11 shard 6 (fit 14.483): dz_dc -0.154, intra_b0 -0.145, q_mid +0.092
+- gen 12 shard 6 (fit 14.813): dz_dc -0.154, q_mid +0.13, deadzone +0.104
+- gen 13 shard 6 (fit 14.759): dz_dc -0.132, q_mid +0.125, adaptq -0.124, skip +0.082
+- gen 14 shard 6 (fit 14.779): dz_dc -0.204, adaptq -0.172
+- gen 15 shard 6 (fit 14.85): dz_dc -0.209, adaptq -0.134
+- gen 16 shard 6 (fit 14.949): adaptq -0.137, dz_dc -0.105
+- gen 17 shard 6 (fit 14.976): adaptq -0.136
+- gen 18 shard 6 (fit 14.975): chroma_q +0.082
+- gen 19 shard 6 (fit 15.034): adaptq -0.086
+- gen 0 shard 7 (fit 9.874): keyint -0.469, search -0.194, baseq +0.193, deblock +0.193, skip +0.158
+- gen 1 shard 7 (fit 10.937): keyint -0.272, baseq +0.238, p_qmul -0.143, deadzone +0.142, q_high +0.127
+- gen 2 shard 7 (fit 11.711): baseq +0.161, intra_pred -0.152, q_low +0.121, q_high +0.094, chroma_q +0.087
+- gen 3 shard 7 (fit 11.869): q_low +0.203, intra_b0 +0.131, intra_pred -0.131, refresh +0.09, skip +0.088
+- gen 4 shard 7 (fit 12.128): chroma_q +0.145
+- gen 5 shard 7 (fit 12.533): chroma_q +0.112, refresh -0.097, q_mid +0.086
+- gen 6 shard 7 (fit 12.756): halfpel -0.193, skip +0.113, adaptq +0.112, p_qmul +0.104, deadzone +0.103
+- gen 7 shard 7 (fit 12.699): halfpel -0.159
+- gen 8 shard 7 (fit 12.926): intra_b0 -0.11
+- gen 9 shard 7 (fit 12.905): skip +0.123, mv_dz -0.101, chroma_q -0.09
+- gen 10 shard 7 (fit 13.02): skip +0.136, p_qmul +0.111, chroma_q -0.105, dither +0.094, gop_q +0.092
+- gen 11 shard 7 (fit 13.021): skip +0.215, intra_b0 -0.198, refresh -0.163, chroma_q -0.153, p_qmul +0.147
+- gen 12 shard 7 (fit 13.383): refresh -0.186, q_low +0.15, dz_dc +0.129, p_qmul +0.128, skip +0.119
+- gen 13 shard 7 (fit 13.905): chroma_q +0.107, p_qmul +0.093, halfpel -0.088
+- gen 14 shard 7 (fit 14.657): dither -0.16, intra_b0 +0.139, halfpel -0.127, q_mid +0.099, adaptq +0.097
+- gen 15 shard 7 (fit 14.639): adaptq +0.115, q_low -0.108, dither -0.093, chroma_q +0.089, intra_b0 -0.087
+- gen 16 shard 7 (fit 14.671): chroma_q +0.159, dz_dc -0.133, dither -0.098, intra_b0 -0.086, gop_q -0.081
+- gen 17 shard 7 (fit 14.874): dz_dc -0.187, adaptq -0.086, chroma_q +0.082
+- gen 18 shard 7 (fit 14.865): dz_dc -0.273
+- gen 19 shard 7 (fit 14.983): dz_dc -0.165, q_low +0.089
+- gen 20 shard 7 (fit 14.943): adaptq +0.118, refresh -0.115, dz_dc -0.111, q_low +0.09
+- gen 21 shard 7 (fit 14.973): refresh -0.164, adaptq -0.132, q_low +0.123
+- gen 23 shard 7 (fit 15.027): adaptq -0.237
+- gen 24 shard 7 (fit 15.064): adaptq -0.094
+- gen 25 shard 7 (fit 15.084): adaptq -0.111
+- gen 0 shard 8 (fit 9.64): keyint -0.447, deblock +0.255, skip +0.254, search -0.198, baseq +0.183
+- gen 1 shard 8 (fit 12.253): keyint -0.303, skip +0.209, baseq +0.171, deadzone +0.148, refresh +0.145
+- gen 2 shard 8 (fit 12.249): intra_pred -0.209, intra_b0 +0.131, baseq +0.12, deadzone +0.116, skip +0.105
+- gen 3 shard 8 (fit 12.399): chroma_q +0.145, refresh -0.128, deadzone +0.121, q_mid +0.102, deblock -0.099
+- gen 4 shard 8 (fit 12.439): chroma_q +0.212, dz_dc -0.131
+- gen 5 shard 8 (fit 13.527): p_qmul +0.246, skip +0.161, dz_dc -0.138, q_low +0.093, search -0.087
+- gen 6 shard 8 (fit 13.929): p_qmul +0.308, skip +0.191, intra_b0 -0.129, adaptq +0.098, chroma_q -0.092
+- gen 7 shard 8 (fit 14.104): p_qmul +0.194, skip +0.156, intra_b0 -0.153
+- gen 8 shard 8 (fit 14.216): intra_b0 -0.176, dither +0.084
+- gen 9 shard 8 (fit 14.302): intra_b0 -0.237, q_high +0.109, chroma_q +0.087, q_low +0.085
+- gen 10 shard 8 (fit 14.419): intra_b0 -0.148, q_low +0.106
+- gen 11 shard 8 (fit 14.539): q_low +0.11, intra_b0 -0.097
+- gen 12 shard 8 (fit 14.591): q_low +0.087, deadzone +0.086, dz_dc -0.082
+- gen 13 shard 8 (fit 14.712): q_high -0.086
+- gen 18 shard 8 (fit 14.991): intra_gop +0.094, q_high +0.087
+- gen 19 shard 8 (fit 14.961): mv_dz -0.106
+- gen 20 shard 8 (fit 15.038): mv_dz -0.162
+- gen 21 shard 8 (fit 15.023): mv_dz -0.161
+- gen 22 shard 8 (fit 15.081): mv_dz -0.14
+- gen 0 shard 9 (fit 9.59): keyint -0.481, refresh -0.259, search -0.173, deblock +0.163, q_low +0.114
+- gen 1 shard 9 (fit 10.831): keyint -0.315, baseq +0.163, q_high +0.124, p_qmul -0.107, dither +0.088
+- gen 2 shard 9 (fit 11.794): baseq +0.214, intra_pred -0.176, halfpel -0.175, q_high +0.111, intra_b0 +0.088
+- gen 3 shard 9 (fit 11.774): chroma_q +0.203, p_qmul -0.122, intra_b0 +0.122, q_low +0.114, mv_q -0.098
+- gen 4 shard 9 (fit 12.181): deblock -0.128, chroma_q +0.114, p_qmul -0.098, mv_q -0.094
+- gen 5 shard 9 (fit 12.356): deblock -0.15, chroma_q +0.144, halfpel +0.088
+- gen 6 shard 9 (fit 12.373): intra_b0 -0.118, search -0.087, q_low +0.084, dz_dc -0.082, deadzone +0.082
+- gen 7 shard 9 (fit 12.827): dz_dc -0.183, deadzone +0.151, skip +0.14, intra_b0 -0.115, q_mid +0.114
+- gen 8 shard 9 (fit 12.795): dz_dc -0.153, intra_b0 -0.117, skip +0.104, adaptq +0.094, deadzone +0.086
+- gen 9 shard 9 (fit 12.769): gop_q -0.135, intra_b0 -0.098, q_high +0.085
+- gen 10 shard 9 (fit 13.984): p_qmul +0.113
+- gen 11 shard 9 (fit 14.091): p_qmul +0.22, skip +0.11, search -0.084
+- gen 12 shard 9 (fit 14.12): skip +0.348, p_qmul +0.339, chroma_q -0.1
+- gen 13 shard 9 (fit 14.258): p_qmul +0.296, skip +0.23, gop_q +0.127
+- gen 14 shard 9 (fit 14.584): p_qmul +0.123, gop_q +0.107, chroma_q +0.102, skip +0.089
+- gen 15 shard 9 (fit 14.608): gop_q +0.196
+- gen 16 shard 9 (fit 14.782): gop_q +0.172
+- gen 17 shard 9 (fit 14.784): adaptq +0.102, gop_q +0.083
+- gen 18 shard 9 (fit 14.776): search +0.084
