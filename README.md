@@ -4,10 +4,12 @@
 scoreboard is real, and the bar is set by real codecs (x264, x265, SVT-AV1,
 libaom) on the same corpus with the same instrument.**
 
-This is an evolutionary codec lab: every bot is a 16-gene genome controlling a
+This is an evolutionary codec lab: every bot is a 27-gene genome controlling a
 real hybrid video codec (8×8 DCT → deadzone quantization → zigzag → integer
-motion estimation → intra refresh → adaptive Q → two entropy modes), written
-in **Zig**. Every generation, bots are evaluated by *encoding and decoding*
+motion estimation → intra refresh → adaptive Q → adaptive binary arithmetic
+entropy coder → intra prediction incl. chroma-from-luma → in-loop deblocking +
+CDEF-lite deringing), written in **Zig** and evolved against the AV1 lineup's
+structural playbook. Every generation, bots are evaluated by *encoding and decoding*
 three deterministic clips and scored on one number:
 
 ```
@@ -121,6 +123,10 @@ in `LESSONS.md`, every milestone is logged in `state/lifetime_evals.json`.
 - **v0.3 (7d)** — champion beats the gen-0 seed pool by ≥25% fitness;
   surrogate ablation (screens on/off) published as a lesson.
 - **v0.4 (30d)** — champion ≥ x264 *ultrafast* at equal PSNR on this corpus.
+- **v0.5 (shipped)** — the AV1-lineup rung: adaptive arithmetic entropy coder
+  (g18), chroma-from-luma (g19), CDEF-lite (g20), SMOOTH/PAETH modes. Local
+  measurement at the champion operating point: fit 19.17 → 24.10
+  (docs/ROADMAP_V05.md).
 - **v1.0 (90d)** — 10^7 oracle evaluations, published RD curves + landscape
   maps (fitness vs genes, from a trillion-candidate search), first
   transferable finding filed upstream (SVT-AV1 / x264 issue or PR).

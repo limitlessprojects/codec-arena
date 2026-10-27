@@ -229,7 +229,8 @@ fn evalAll(
         var failed = false;
 
         for (clips.items) |*clip| {
-            const st = codec.evalClip(alloc, io, clip, &g, .{ .fast_sad = fast }) catch {
+            const st = codec.evalClip(alloc, io, clip, &g, .{ .fast_sad = fast }) catch |e| {
+                std.debug.print("[evalClip error: {any} clip={s}]\n", .{ e, clip.name });
                 failed = true;
                 break;
             };

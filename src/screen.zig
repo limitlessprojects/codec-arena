@@ -22,16 +22,17 @@ const gen = @import("genome.zig");
 
 pub const Model = struct {
     w0: f32,
-    w_lin: [gen.NTOT]f32, // 24: 18 effectors (incl. v0.4 intra_pred/deblock) + 6 regulators
+    w_lin: [gen.NTOT]f32, // 27: 21 effectors (incl. v0.4 intra/deblock, v0.5 entropy/cfl/cdef) + 6 regulators
     w_quad: [256]f32, // flat 16x16 over the 16 LEGACY effectors, zeros in strict upper
 
     /// Expand the compact weight layout into the flat SIMD-friendly layout.
     /// v1: 153 = 1 + 16 linear + 136 quad (regulator weights default 0 = neutral).
     /// v2: 159 = 1 + 22 linear + 136 quad.
     /// v3: 161 = 1 + 24 linear (16 eff + intra_pred + deblock + 6 reg) + 136 quad.
+    /// v4: 164 = 1 + 27 linear (+ entropy + cfl + cdef) + 136 quad.
     /// Quad feature idx 17+T(i)+j maps to quad[i*16+j], T(i)=i*(i+1)/2.
     pub fn fromCompact(w: []const f32) !Model {
-        if (w.len != 153 and w.len != 159 and w.len != 161) return error.BadModel;
+        if (w.len != 153 and w.len != 159 and w.len != 161 and w.len != 164) return error.BadModel;
         var m: Model = undefined;
         m.w0 = w[0];
         @memset(&m.w_lin, 0);
@@ -39,6 +40,14 @@ pub const Model = struct {
         // linear: legacy effectors always at w[1..16]; the v0.4 genes ride at
         // flat positions 16,17 (weights 0 = neutral until a v3 refit learns them)
         for (0..16) |i| m.w_lin[i] = w[1 + i];
+        if (w.len == 164) {
+            m.w_lin[16] = w[17]; // intra_pred
+            m.w_lin[17] = w[18]; // deblock
+            m.w_lin[18] = w[19]; // entropy
+            m.w_lin[19] = w[20]; // cfl
+            m.w_lin[20] = w[21]; // cdef
+            for (0..gen.NR) |i| m.w_lin[gen.NG + i] = w[22 + i];
+        }
         if (w.len == 161) {
             m.w_lin[16] = w[17]; // intra_pred
             m.w_lin[17] = w[18]; // deblock
@@ -50,7 +59,8 @@ pub const Model = struct {
         var idx: usize = switch (w.len) {
             153 => 17,
             159 => 23,
-            else => 25,
+            161 => 25,
+            else => 28,
         };
         for (0..16) |i| {
             for (0..i + 1) |j| {
@@ -84,7 +94,7 @@ pub fn loadModel(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !Model 
     const txt = try dir.readFileAlloc(io, path, alloc, .limited(1 << 20));
     var it = std.mem.tokenizeAny(u8, txt, " \t\r\n");
     const n = try std.fmt.parseInt(usize, it.next() orelse return error.BadModel, 10);
-    if (n != 153 and n != 159 and n != 161) return error.BadModel;
+    if (n != 153 and n != 159 and n != 161 and n != 164) return error.BadModel;
     const w = try alloc.alloc(f32, n);
     for (0..n) |i| {
         const tok = it.next() orelse return error.BadModel;

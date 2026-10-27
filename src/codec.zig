@@ -170,6 +170,355 @@ const BR = struct {
     }
 };
 
+// --------------------------------------------------- adaptive entropy coder
+// v0.5 — learned from the AV1 lineup (daala EC / CABAC / LZMA rc): when the
+// entropy gene is on, the per-plane block stream (markers, motion vectors,
+// (run,level) pairs) is coded with a binary adaptive arithmetic coder instead
+// of byte varints. One adaptive 11-bit probability per decision context
+// (LZMA update rule: p += (target - p) >> 5); the engine is the carry-
+// propagating range coder both sides mirror exactly. The mode map keeps its
+// bit-packed form (already narrow). Gene 0 = byte-exact legacy stream.
+
+const PROB_BITS: u5 = 11;
+const PROB_ONE: u16 = 1 << PROB_BITS; // 2048 == P(bit=0) == 1
+const PROB_INIT: u16 = PROB_ONE / 2;
+const RC_TOP: u32 = 1 << 24;
+
+/// Adaptive probability states, reset per plane on both sides.
+const Probs = [64]u16;
+
+inline fn pUpdate(p: *u16, bit: u1) void {
+    // LZMA rule, truncated: p moves 1/32 of the way toward the target bit.
+    // @divTrunc (NOT an arithmetic shift of the negative delta) never
+    // overshoots, and the clamps guarantee 1 <= p <= 2047 so the coded
+    // subinterval can never vanish — a zero probability would zero the
+    // range and spin the renormalization loop forever.
+    const target: i32 = if (bit == 0) PROB_ONE else 0;
+    const d: i32 = @divTrunc(target - @as(i32, p.*), 1 << PROB_MOVE);
+    var np: i32 = @as(i32, p.*) + d;
+    if (np < 1) np = 1;
+    if (np > PROB_ONE - 1) np = PROB_ONE - 1;
+    p.* = @intCast(np);
+}
+const PROB_MOVE: u5 = 5;
+
+// decision-context layout (both sides share the constants)
+const CX_MARK_A: usize = 0; // block marker: skip?
+const CX_MARK_B: usize = 1; // block marker: intra (vs inter)?
+const CX_MV_SIGN: usize = 2;
+const CX_MV_U0: usize = 3; // MV magnitude unary (>0,>1,>2)
+const CX_MV_B0: usize = 6; // MV magnitude raw 4 bits (mag-3)
+const CX_SP_B0: usize = 10; // half-pel code, raw 4 bits
+const CX_NP_U0: usize = 14; // npairs unary (>0..>3)
+const CX_NP_B0: usize = 18; // npairs raw 6 bits (np-4)
+const CX_RN_U0: usize = 22; // run unary (>0..>3)
+const CX_RN_B0: usize = 26; // run raw 6 bits (run-4)
+const CX_LV_U0: usize = 30; // level abs-1 unary (>0,>1,>2)
+const CX_LV_ESC: usize = 33; // level big-escape flag
+const CX_LV_B0: usize = 34; // level raw bits (12, +16 on escape)
+const CX_LV_SIGN: usize = 46;
+
+const ACEnc = struct {
+    buf: []u8,
+    n: usize = 0,
+    low: u64 = 0,
+    range: u32 = 0xFFFF_FFFF,
+    cache: u8 = 0,
+    cache_size: u32 = 1,
+
+    /// LZMA-style delayed-carry byte flush.
+    fn shiftLow(self: *ACEnc) void {
+        const carry: u8 = @truncate(self.low >> 32);
+        if (self.low < 0xFF00_0000 or carry != 0) {
+            var temp = self.cache;
+            while (true) {
+                if (self.n >= self.buf.len) return; // guarded by buffer sizing
+                self.buf[self.n] = temp +% carry;
+                self.n += 1;
+                temp = 0xFF;
+                self.cache_size -= 1;
+                if (self.cache_size == 0) break;
+            }
+            self.cache = @truncate(self.low >> 24);
+        }
+        self.cache_size += 1;
+        self.low = (self.low << 8) & 0xFFFF_FFFF;
+    }
+
+    fn encodeBit(self: *ACEnc, ps: *Probs, ci: usize, bit: u1) void {
+        const p = &ps[ci];
+        const bound: u32 = (self.range >> PROB_BITS) * @as(u32, p.*);
+        if (bit == 0) {
+            self.range = bound;
+        } else {
+            self.low += bound;
+            self.range -= bound;
+        }
+        while (self.range < RC_TOP) {
+            self.range <<= 8;
+            self.shiftLow();
+        }
+        pUpdate(p, bit);
+    }
+
+    fn flush(self: *ACEnc) void {
+        for (0..5) |_| self.shiftLow();
+    }
+};
+
+const ACDec = struct {
+    br: *BR,
+    range: u32 = 0xFFFF_FFFF,
+    code: u32 = 0,
+
+    fn init(self: *ACDec) !void {
+        _ = try self.br.getU8(); // encoder's initial cache byte — skipped
+        for (0..4) |_| {
+            self.code = (self.code << 8) | try self.br.getU8();
+        }
+    }
+
+    fn decodeBit(self: *ACDec, ps: *Probs, ci: usize) !u1 {
+        const p = &ps[ci];
+        const bound: u32 = (self.range >> PROB_BITS) * @as(u32, p.*);
+        var bit: u1 = 0;
+        if (self.code < bound) {
+            self.range = bound;
+        } else {
+            self.code -= bound;
+            self.range -= bound;
+            bit = 1;
+        }
+        while (self.range < RC_TOP) {
+            self.range <<= 8;
+            self.code = (self.code << 8) | try self.br.getU8();
+        }
+        pUpdate(p, bit);
+        return bit;
+    }
+};
+
+/// Raw big-endian bit tuple through the arithmetic coder (MSB first).
+fn encUBits(ac: *ACEnc, ps: *Probs, base: usize, nb: u5, v: u32) void {
+    var i: u5 = nb;
+    while (i > 0) {
+        i -= 1;
+        ac.encodeBit(ps, base + (nb - 1 - i), @truncate((v >> i) & 1));
+    }
+}
+fn decUBits(ac: *ACDec, ps: *Probs, base: usize, nb: u5) !u32 {
+    var v: u32 = 0;
+    for (0..nb) |k| {
+        const b = try ac.decodeBit(ps, base + k);
+        v = (v << 1) | b;
+    }
+    return v;
+}
+/// Truncated unary: `v` ones (capped at n_units) then a zero — unless v
+/// equals n_units, where the terminator is omitted; the decoder counts the
+/// same way, so both sides consume identical decisions.
+fn encUnary(ac: *ACEnc, ps: *Probs, base: usize, v: u32, n_units: usize) void {
+    var k: u32 = 0;
+    while (k < n_units) : (k += 1) {
+        const one: u1 = @intFromBool(v > k);
+        ac.encodeBit(ps, base + k, one);
+        if (one == 0) break;
+    }
+}
+fn decUnary(ac: *ACDec, ps: *Probs, base: usize, n_units: usize) !u32 {
+    var v: u32 = 0;
+    while (v < n_units) {
+        if (try ac.decodeBit(ps, base + v) == 0) break;
+        v += 1;
+    }
+    return v;
+}
+
+fn encMarker(ac: *ACEnc, ps: *Probs, m: u8) void {
+    if (m == 1) { // skip
+        ac.encodeBit(ps, CX_MARK_A, 1);
+        return;
+    }
+    ac.encodeBit(ps, CX_MARK_A, 0);
+    ac.encodeBit(ps, CX_MARK_B, if (m == 2) 1 else 0);
+}
+fn decMarker(ac: *ACDec, ps: *Probs) !u8 {
+    if (try ac.decodeBit(ps, CX_MARK_A) == 1) return 1;
+    return if (try ac.decodeBit(ps, CX_MARK_B) == 1) 2 else 0;
+}
+
+fn encMV(ac: *ACEnc, ps: *Probs, d: i32) void {
+    ac.encodeBit(ps, CX_MV_SIGN, if (d < 0) 1 else 0);
+    const mag: u32 = @intCast(@abs(d));
+    encUnary(ac, ps, CX_MV_U0, mag, 3);
+    if (mag > 2) encUBits(ac, ps, CX_MV_B0, 4, mag - 3);
+}
+fn decMV(ac: *ACDec, ps: *Probs) !i32 {
+    const s = try ac.decodeBit(ps, CX_MV_SIGN);
+    var mag = try decUnary(ac, ps, CX_MV_U0, 3);
+    if (mag > 2) mag = 3 + try decUBits(ac, ps, CX_MV_B0, 4);
+    return if (s == 1) -@as(i32, @intCast(mag)) else @as(i32, @intCast(mag));
+}
+
+fn acEncLevel(ac: *ACEnc, ps: *Probs, l: i32) void {
+    ac.encodeBit(ps, CX_LV_SIGN, if (l < 0) 1 else 0);
+    const v: u32 = @as(u32, @intCast(@abs(l))) - 1;
+    encUnary(ac, ps, CX_LV_U0, v, 3);
+    if (v > 2) {
+        const w: u32 = v - 3;
+        if (w >= 4095) {
+            ac.encodeBit(ps, CX_LV_ESC, 1);
+            encUBits(ac, ps, CX_LV_B0, 12, 4095);
+            encUBits(ac, ps, CX_LV_B0, 16, w - 4095);
+        } else {
+            ac.encodeBit(ps, CX_LV_ESC, 0);
+            encUBits(ac, ps, CX_LV_B0, 12, w);
+        }
+    }
+}
+fn acDecLevel(ac: *ACDec, ps: *Probs) !i32 {
+    const s = try ac.decodeBit(ps, CX_LV_SIGN);
+    var v = try decUnary(ac, ps, CX_LV_U0, 3);
+    if (v > 2) {
+        const esc = try ac.decodeBit(ps, CX_LV_ESC);
+        var w = try decUBits(ac, ps, CX_LV_B0, 12);
+        if (esc == 1) w = 4095 + try decUBits(ac, ps, CX_LV_B0, 16);
+        v = 3 + w;
+    }
+    const m: i32 = @intCast(v + 1);
+    return if (s == 1) -m else m;
+}
+
+/// AC-coded (run, level) payload — the adaptive twin of packPairs.
+fn acEncLevels(ac: *ACEnc, ps: *Probs, lv: []const i32, last: usize) void {
+    var npairs: u32 = 0;
+    for (lv[0 .. last + 1]) |l| {
+        if (l != 0) npairs += 1;
+    }
+    encUnary(ac, ps, CX_NP_U0, npairs, 4);
+    if (npairs > 3) encUBits(ac, ps, CX_NP_B0, 6, npairs - 4);
+    var run: u32 = 0;
+    for (0..last + 1) |k| {
+        if (lv[k] == 0) {
+            run += 1;
+        } else {
+            encUnary(ac, ps, CX_RN_U0, run, 4);
+            if (run > 3) encUBits(ac, ps, CX_RN_B0, 6, run - 4);
+            acEncLevel(ac, ps, lv[k]);
+            run = 0;
+        }
+    }
+}
+fn acDecLevels(ac: *ACDec, ps: *Probs, g: *const gen.Genome, qp: f32, scale: f32, rc: gen.RegCtx, coef: *[64]f32) !void {
+    for (coef) |*c| c.* = 0;
+    var npairs = try decUnary(ac, ps, CX_NP_U0, 4);
+    if (npairs > 3) npairs = 4 + try decUBits(ac, ps, CX_NP_B0, 6);
+    var k: u32 = 0;
+    var i: u32 = 0;
+    while (i < npairs) : (i += 1) {
+        var run = try decUnary(ac, ps, CX_RN_U0, 4);
+        if (run > 3) run = 4 + try decUBits(ac, ps, CX_RN_B0, 6);
+        k += run;
+        if (k >= 64) return error.Corrupt;
+        const lvl = try acDecLevel(ac, ps);
+        coef[ZZ[@intCast(k)]] = @as(f32, @floatFromInt(lvl)) * levelQ(g, qp, scale, @intCast(k), rc);
+        k += 1;
+    }
+}
+
+/// Comptime-specialized block-stream writer: one source, two bitstreams.
+/// Legacy=false is the byte-varint path (byte-exact v0.4); Legacy=true is
+/// the adaptive arithmetic coder (v0.5 entropy gene).
+fn BlockW(comptime ac_on: bool) type {
+    return struct {
+        bw: BW = undefined,
+        ac: ACEnc = undefined,
+        ps: Probs = undefined,
+
+        fn init(buf: []u8) @This() {
+            if (ac_on) return .{ .ac = .{ .buf = buf }, .ps = @splat(PROB_INIT) };
+            return .{ .bw = .{ .buf = buf } };
+        }
+        fn marker(self: *@This(), m: u8) void {
+            if (ac_on) encMarker(&self.ac, &self.ps, m) else self.bw.putU8(m);
+        }
+        fn mv(self: *@This(), dx: i32, dy: i32) void {
+            if (ac_on) {
+                encMV(&self.ac, &self.ps, dx);
+                encMV(&self.ac, &self.ps, dy);
+            } else {
+                self.bw.putSvarint(dx);
+                self.bw.putSvarint(dy);
+            }
+        }
+        fn subpel(self: *@This(), code: u8) void {
+            if (ac_on) encUBits(&self.ac, &self.ps, CX_SP_B0, 4, code) else self.bw.putU8(code);
+        }
+        fn levels(self: *@This(), lv: []const i32, last: usize) void {
+            if (ac_on) acEncLevels(&self.ac, &self.ps, lv, last) else packPairs(&self.bw, lv, last);
+        }
+        fn written(self: *@This()) usize {
+            return if (ac_on) self.ac.n else self.bw.n;
+        }
+        fn finish(self: *@This()) void {
+            if (ac_on) self.ac.flush();
+        }
+    };
+}
+fn BlockR(comptime ac_on: bool) type {
+    return struct {
+        br: *BR,
+        ac: ACDec = undefined,
+        ps: Probs = undefined,
+
+        fn init(br: *BR) !@This() {
+            if (ac_on) {
+                var r = @This(){ .br = br, .ac = .{ .br = br } };
+                try r.ac.init();
+                r.ps = @splat(PROB_INIT);
+                return r;
+            }
+            return .{ .br = br };
+        }
+        fn marker(self: *@This()) !u8 {
+            if (ac_on) return decMarker(&self.ac, &self.ps);
+            return try self.br.getU8();
+        }
+        fn mvPair(self: *@This()) ![2]i32 {
+            if (ac_on) return .{ try decMV(&self.ac, &self.ps), try decMV(&self.ac, &self.ps) };
+            const dx = try self.br.getSvarint();
+            const dy = try self.br.getSvarint();
+            const cdx = std.math.cast(i32, dx) orelse return error.Corrupt;
+            const cdy = std.math.cast(i32, dy) orelse return error.Corrupt;
+            return .{ cdx, cdy };
+        }
+        fn subpel(self: *@This()) !u8 {
+            if (ac_on) return @intCast(try decUBits(&self.ac, &self.ps, CX_SP_B0, 4));
+            return try self.br.getU8();
+        }
+        /// Legacy twin: read (npairs, pairs) and fill the dequantized coef array.
+        fn levels(self: *@This(), g: *const gen.Genome, qp: f32, scale: f32, rc: gen.RegCtx, coef: *[64]f32) !void {
+            if (ac_on) {
+                try acDecLevels(&self.ac, &self.ps, g, qp, scale, rc, coef);
+                return;
+            }
+            for (coef) |*c| c.* = 0;
+            const npairs = try self.br.getUvarint();
+            var k: u64 = 0;
+            var i: u64 = 0;
+            while (i < npairs) : (i += 1) {
+                const run = try self.br.getUvarint();
+                const lvl = try self.br.getSvarint();
+                k += run;
+                if (k >= 64) return error.Corrupt;
+                const lf: f32 = @floatFromInt(lvl);
+                coef[ZZ[@intCast(k)]] = lf * levelQ(g, qp, scale, @intCast(k), rc);
+                k += 1;
+            }
+        }
+    };
+}
+
 // ------------------------------------------------------------ block coding
 
 fn dct8(src: []const u8, out: *[64]f32) void {
@@ -282,34 +631,85 @@ pub const INTRA_HORIZONTAL: u8 = 4;
 pub const INTRA_DIAG_DR: u8 = 5; // diagonal down-right from the top-left corner
 pub const INTRA_DIAG_DL: u8 = 6; // diagonal down-left from the top row
 pub const INTRA_HOR_DOWN: u8 = 7; // from the left column, shifted by column
+// v0.5 — learned from the AV1 lineup: smooth-family prediction, PAETH's
+// nearest-edge pick, and chroma-from-luma with four signed alphas.
+pub const INTRA_SMOOTH: u8 = 8; // H/V planar-blend average (AV1 SMOOTH)
+pub const INTRA_PAETH: u8 = 9; // nearest of left/top/topleft (PNG/AV1)
+pub const INTRA_CFL_N2: u8 = 10; // chroma-from-luma, alpha = -2/2
+pub const INTRA_CFL_N1: u8 = 11; // chroma-from-luma, alpha = -1/2
+pub const INTRA_CFL_P1: u8 = 12; // chroma-from-luma, alpha = +1/2
+pub const INTRA_CFL_P2: u8 = 13; // chroma-from-luma, alpha = +2/2
 
-/// Enabled intra modes for this genome. NONE is ALWAYS present as mode 0 in
-/// every non-legacy set: the clamp-aware mode decision then guarantees the
-/// chosen predictor is never worse than the legacy raw-DCT path per block —
-/// richer sets can only help, never crater. A single {NONE} set means legacy
-/// raw-DCT intra: no prediction, no mode map, byte-exact v0.1-v0.3 bitstream.
-pub fn intraModes(g: *const gen.Genome) []const u8 {
+const SET_NONE: []const u8 = &.{INTRA_NONE};
+const SET_ND: []const u8 = &.{ INTRA_NONE, INTRA_DC };
+const SET_5: []const u8 = &.{ INTRA_NONE, INTRA_DC, INTRA_PLANAR, INTRA_VERTICAL, INTRA_HORIZONTAL };
+const SET_8: []const u8 = &.{ INTRA_NONE, INTRA_DC, INTRA_PLANAR, INTRA_VERTICAL, INTRA_HORIZONTAL, INTRA_DIAG_DR, INTRA_DIAG_DL, INTRA_HOR_DOWN };
+const SET_10: []const u8 = &.{ INTRA_NONE, INTRA_DC, INTRA_PLANAR, INTRA_VERTICAL, INTRA_HORIZONTAL, INTRA_DIAG_DR, INTRA_DIAG_DL, INTRA_HOR_DOWN, INTRA_SMOOTH, INTRA_PAETH };
+const SET_NONE_CFL: []const u8 = &.{ INTRA_NONE, INTRA_CFL_N2, INTRA_CFL_N1, INTRA_CFL_P1, INTRA_CFL_P2 };
+const SET_ND_CFL: []const u8 = &.{ INTRA_NONE, INTRA_DC, INTRA_CFL_N2, INTRA_CFL_N1, INTRA_CFL_P1, INTRA_CFL_P2 };
+const SET_5_CFL: []const u8 = &.{ INTRA_NONE, INTRA_DC, INTRA_PLANAR, INTRA_VERTICAL, INTRA_HORIZONTAL, INTRA_CFL_N2, INTRA_CFL_N1, INTRA_CFL_P1, INTRA_CFL_P2 };
+const SET_8_CFL: []const u8 = &.{ INTRA_NONE, INTRA_DC, INTRA_PLANAR, INTRA_VERTICAL, INTRA_HORIZONTAL, INTRA_DIAG_DR, INTRA_DIAG_DL, INTRA_HOR_DOWN, INTRA_CFL_N2, INTRA_CFL_N1, INTRA_CFL_P1, INTRA_CFL_P2 };
+const SET_10_CFL: []const u8 = &.{ INTRA_NONE, INTRA_DC, INTRA_PLANAR, INTRA_VERTICAL, INTRA_HORIZONTAL, INTRA_DIAG_DR, INTRA_DIAG_DL, INTRA_HOR_DOWN, INTRA_SMOOTH, INTRA_PAETH, INTRA_CFL_N2, INTRA_CFL_N1, INTRA_CFL_P1, INTRA_CFL_P2 };
+
+/// Enabled intra modes for this genome and plane kind. NONE is ALWAYS
+/// present as mode 0 in every non-legacy set: the clamp-aware mode decision
+/// then guarantees the chosen predictor is never worse than the legacy
+/// raw-DCT path per block — richer sets can only help, never crater. A
+/// single {NONE} set means legacy raw-DCT intra: no prediction, no mode
+/// map, byte-exact v0.1-v0.3 bitstream. Tier >=0.925 adds SMOOTH/PAETH
+/// (v0.5); chroma planes with the cfl gene on append the four CFL variants
+/// (AV1 chroma-from-luma) — the map width is per-plane and both sides
+/// derive it from the genome, so CFL costs zero extra signaling.
+pub fn intraModes(g: *const gen.Genome, chroma: bool) []const u8 {
     const v = gen.intraPredGene(g);
-    if (v < 0.25) return &.{INTRA_NONE};
-    if (v < 0.55) return &.{ INTRA_NONE, INTRA_DC };
-    if (v < 0.85) return &.{ INTRA_NONE, INTRA_DC, INTRA_PLANAR, INTRA_VERTICAL, INTRA_HORIZONTAL };
-    return &.{ INTRA_NONE, INTRA_DC, INTRA_PLANAR, INTRA_VERTICAL, INTRA_HORIZONTAL, INTRA_DIAG_DR, INTRA_DIAG_DL, INTRA_HOR_DOWN };
+    const cfl = chroma and gen.cflGene(g) > 0.5;
+    if (v < 0.25) return if (cfl) SET_NONE_CFL else SET_NONE;
+    if (v < 0.55) return if (cfl) SET_ND_CFL else SET_ND;
+    if (v < 0.85) return if (cfl) SET_5_CFL else SET_5;
+    if (v < 0.925) return if (cfl) SET_8_CFL else SET_8;
+    return if (cfl) SET_10_CFL else SET_10;
 }
 
 /// Bits needed to index a mode within a set of n (ceil(log2(n))). Both sides
 /// derive it from the genome, so the mode map costs 1 bit/block for
-/// {NONE,DC} and 3 bits/block for the 5- and 8-mode sets — x264-style narrow
+/// {NONE,DC} and 3-4 bits/block for the richer sets — x264-style narrow
 /// signaling in a per-plane map instead of a byte per block.
 pub fn intraModeBits(n: usize) u5 {
     if (n <= 1) return 0;
     return @intCast(32 - @clz(@as(u32, @intCast(n - 1))));
 }
 
+/// DC prediction of an 8x8 block from its recon neighbors (shared by the
+/// DC mode and the CFL base term).
+fn dcPred8(recon: []const u8, pw: usize, sx: usize, sy: usize) u8 {
+    const have_top = sy > 0;
+    const have_left = sx > 0;
+    var dc: i32 = 128 * 16;
+    if (have_top and have_left) {
+        var s: i32 = 0;
+        for (0..8) |i| s += recon[(sy - 1) * pw + sx + i];
+        for (0..8) |i| s += recon[(sy + i) * pw + sx - 1];
+        dc = @divTrunc(s + 8, 16);
+    } else if (have_top) {
+        var s: i32 = 0;
+        for (0..8) |i| s += recon[(sy - 1) * pw + sx + i];
+        dc = @divTrunc(s + 4, 8);
+    } else if (have_left) {
+        var s: i32 = 0;
+        for (0..8) |i| s += recon[(sy + i) * pw + sx - 1];
+        dc = @divTrunc(s + 4, 8);
+    }
+    return @intCast(std.math.clamp(dc, 0, 255));
+}
+
 /// Build the 8x8 prediction block for `mode` from the recon plane at block
 /// (sx, sy). Unavailable neighbors (frame edges) are filled with 128.
-/// Deterministic in (mode, plane contents, sx, sy, pw, ph) only — the same
-/// function runs on both sides, so predictions can never desynchronize.
-fn intraPredict(mode: u8, recon: []const u8, pw: usize, ph: usize, sx: usize, sy: usize, out: *[64]u8) void {
+/// Deterministic in (mode, plane contents, sx, sy, pw, ph, luma, lpw) only —
+/// the same function runs on both sides, so predictions can never
+/// desynchronize. `luma` is the co-located reconstructed luma plane (chroma
+/// CFL modes only); at the point chroma is coded, both sides hold the SAME
+/// pre-deblocking luma recon, so CFL needs zero side information.
+fn intraPredict(mode: u8, recon: []const u8, pw: usize, ph: usize, sx: usize, sy: usize, out: *[64]u8, luma: ?[]const u8, lpw: usize) void {
     var top: [8]u8 = @splat(128);
     var left: [8]u8 = @splat(128);
     var tl: u8 = 128;
@@ -343,22 +743,7 @@ fn intraPredict(mode: u8, recon: []const u8, pw: usize, ph: usize, sx: usize, sy
             };
         },
         INTRA_DC => {
-            var dc: i32 = 128 * 16;
-            if (have_top and have_left) {
-                var s: i32 = 0;
-                for (0..8) |i| s += top[i];
-                for (0..8) |i| s += left[i];
-                dc = @divTrunc(s + 8, 16);
-            } else if (have_top) {
-                var s: i32 = 0;
-                for (0..8) |i| s += top[i];
-                dc = @divTrunc(s + 4, 8);
-            } else if (have_left) {
-                var s: i32 = 0;
-                for (0..8) |i| s += left[i];
-                dc = @divTrunc(s + 4, 8);
-            }
-            const px: u8 = @intCast(std.math.clamp(dc, 0, 255));
+            const px = dcPred8(recon, pw, sx, sy);
             @memset(out, px);
         },
         INTRA_PLANAR => {
@@ -391,6 +776,63 @@ fn intraPredict(mode: u8, recon: []const u8, pw: usize, ph: usize, sx: usize, sy
             for (0..8) |r| for (0..8) |c| {
                 const idx = @min(@as(usize, 7), r + (c + 1) / 2);
                 out[r * 8 + c] = left[idx];
+            };
+        },
+        INTRA_SMOOTH => {
+            // AV1 SMOOTH: bilinear blends of the top/left edges, averaged.
+            for (0..8) |r| for (0..8) |c| {
+                const h: i32 = @divTrunc((7 - @as(i32, @intCast(c))) * @as(i32, left[r]) +
+                    (@as(i32, @intCast(c)) + 1) * @as(i32, tr) + 4, 8);
+                const vv: i32 = @divTrunc((7 - @as(i32, @intCast(r))) * @as(i32, top[c]) +
+                    (@as(i32, @intCast(r)) + 1) * @as(i32, bl) + 4, 8);
+                out[r * 8 + c] = @intCast(std.math.clamp((h + vv + 1) >> 1, 0, 255));
+            };
+        },
+        INTRA_PAETH => {
+            // PNG/AV1 PAETH: the neighbor closest to the plane predictor.
+            for (0..8) |r| for (0..8) |c| {
+                const pl: i32 = @as(i32, left[r]) + @as(i32, top[c]) - @as(i32, tl);
+                const dl = @abs(pl - @as(i32, left[r]));
+                const dt = @abs(pl - @as(i32, top[c]));
+                const dtl = @abs(pl - @as(i32, tl));
+                const v: u8 = if (dl <= dt and dl <= dtl) left[r] else if (dt <= dtl) top[c] else tl;
+                out[r * 8 + c] = v;
+            };
+        },
+        INTRA_CFL_N2, INTRA_CFL_N1, INTRA_CFL_P1, INTRA_CFL_P2 => {
+            // AV1 chroma-from-luma: decimate the co-located 16x16 luma block
+            // to 8x8 (2x2 mean), remove its mean, scale by the signed alpha
+            // (a2 = 2*alpha), and add the chroma DC base. All inputs are the
+            // recon planes both sides already share — zero side information.
+            const lum = luma.?;
+            var ld: [64]i32 = undefined;
+            var mean: i64 = 0;
+            for (0..8) |r| {
+                const ly0 = 2 * sy + 2 * r;
+                const ly1 = ly0 + 1;
+                for (0..8) |c| {
+                    const lx0 = 2 * sx + 2 * c;
+                    const s: i32 = @as(i32, lum[ly0 * lpw + lx0]) +
+                        @as(i32, lum[ly0 * lpw + lx0 + 1]) +
+                        @as(i32, lum[ly1 * lpw + lx0]) +
+                        @as(i32, lum[ly1 * lpw + lx0 + 1]);
+                    const d = s >> 2;
+                    ld[r * 8 + c] = d;
+                    mean += d;
+                }
+            }
+            const lm: i32 = @intCast(@divTrunc(mean + 32, 64));
+            const dc: i32 = @as(i32, dcPred8(recon, pw, sx, sy));
+            const a2: i32 = switch (mode) {
+                INTRA_CFL_N2 => -2,
+                INTRA_CFL_N1 => -1,
+                INTRA_CFL_P1 => 1,
+                else => 2,
+            };
+            for (0..8) |r| for (0..8) |c| {
+                const lp = ld[r * 8 + c] - lm;
+                const v = dc + @divTrunc(a2 * lp, 2);
+                out[r * 8 + c] = @intCast(std.math.clamp(v, 0, 255));
             };
         },
         else => unreachable, // encoder only writes modes from intraModes()
@@ -458,6 +900,98 @@ fn deblockFrame(g: *const gen.Genome, y: []u8, u: []u8, v: []u8, w: usize, h: us
     deblockPlane(v, w / 2, h / 2, s, qp);
 }
 
+// ---------------------------------------------------- CDEF-lite deringing
+// v0.5 — learned from the AV1 lineup (CDEF, the constrained directional
+// enhancement filter): after deblocking, a short directional smoothing pass
+// removes residual ringing along each block's dominant edge direction.
+// Simplified from AV1: 4 line orientations (0/45/90/135 degrees) chosen by
+// constrained-gradient argmin on the RECONSTRUCTED block (decoder-derivable,
+// zero side info), 5-tap constrained averaging along the line with qp-scaled
+// damping, skip on isotropic blocks (no dominant edge to enhance).
+// Frame-atomic like deblock: reads a snapshot, writes the plane in place,
+// runs identically on both sides. Gene-gated: <=0.5 = off = legacy recon.
+
+fn cdefConstrain(v: i32, center: i32, th: i32) i32 {
+    return center + std.math.clamp(v - center, -th, th);
+}
+
+fn cdefPlane(p: []u8, pw: usize, ph: usize, qp: f32, snap: []u8) void {
+    @memcpy(snap[0 .. pw * ph], p[0 .. pw * ph]);
+    const qp_i: i32 = @intFromFloat(qp);
+    const damp: usize = @intCast(2 + @divTrunc(qp_i, 24)); // tap displacement cap
+    const nbx = pw / 8;
+    const nby = ph / 8;
+    // 4 line orientations: (dx,dy) positive-step along the line
+    const dirs = [4][2]i32{ .{ 1, 0 }, .{ 1, 1 }, .{ 0, 1 }, .{ -1, 1 } };
+    var by: usize = 0;
+    while (by < nby) : (by += 1) {
+        var bx: usize = 0;
+        while (bx < nbx) : (bx += 1) {
+            const sx = bx * 8;
+            const sy = by * 8;
+            // dominant direction: min constrained-gradient cost over 4 lines
+            var best_dir: usize = 0;
+            var best_cost: i64 = std.math.maxInt(i64);
+            for (dirs, 0..) |d, di| {
+                var cost: i64 = 0;
+                var r: usize = 2;
+                while (r < 6) : (r += 1) {
+                    var c: usize = 2;
+                    while (c < 6) : (c += 1) {
+                        const x: i32 = @as(i32, @intCast(sx + c));
+                        const y: i32 = @as(i32, @intCast(sy + r));
+                        const ctr: i32 = snap[@as(usize, @intCast(y)) * pw + @as(usize, @intCast(x))];
+                        for (1..3) |k| {
+                            const kk: i32 = @intCast(k);
+                            const xx = std.math.clamp(x + d[0] * kk, 0, @as(i32, @intCast(pw - 1)));
+                            const yy = std.math.clamp(y + d[1] * kk, 0, @as(i32, @intCast(ph - 1)));
+                            const smp: i32 = snap[@as(usize, @intCast(yy)) * pw + @as(usize, @intCast(xx))];
+                            cost += @divTrunc(@as(i64, @intCast(@abs(smp - ctr))), 4);
+                        }
+                    }
+                }
+                if (cost < best_cost) {
+                    best_cost = cost;
+                    best_dir = di;
+                }
+            }
+            // isotropic block: no dominant edge -> skip (AV1's skip condition,
+            // simplified). Threshold scales with block area (64 px, inner 16
+            // sampled twice => 128 pairs max at avg grad 2).
+            if (best_cost > 512) continue;
+            const d = dirs[best_dir];
+            for (0..8) |r| {
+                for (0..8) |c| {
+                    const x: i32 = @as(i32, @intCast(sx + c));
+                    const y: i32 = @as(i32, @intCast(sy + r));
+                    const ci: usize = @as(usize, @intCast(y)) * pw + @as(usize, @intCast(x));
+                    const ctr: i32 = snap[ci];
+                    var sum: i64 = ctr;
+                    for (1..3) |k| {
+                        const kk: i32 = @intCast(@min(k, damp));
+                        for (0..2) |sg| {
+                            const sgn: i32 = if (sg == 0) 1 else -1;
+                            const xx = std.math.clamp(x + d[0] * kk * sgn, 0, @as(i32, @intCast(pw - 1)));
+                            const yy = std.math.clamp(y + d[1] * kk * sgn, 0, @as(i32, @intCast(ph - 1)));
+                            const smp: i32 = snap[@as(usize, @intCast(yy)) * pw + @as(usize, @intCast(xx))];
+                            sum += cdefConstrain(smp, ctr, 6);
+                        }
+                    }
+                    p[ci] = @intCast(std.math.clamp(@divTrunc(sum + 2, 5), 0, 255));
+                }
+            }
+        }
+    }
+}
+
+fn cdefFrame(g: *const gen.Genome, y: []u8, u: []u8, v: []u8, w: usize, h: usize, qp: f32, snap: []u8) void {
+    const gene = gen.cdefGene(g);
+    if (gene <= 0.5) return;
+    cdefPlane(y, w, h, qp, snap);
+    cdefPlane(u, w / 2, h / 2, qp, snap);
+    cdefPlane(v, w / 2, h / 2, qp, snap);
+}
+
 // ------------------------------------------------------------- context
 
 const Ctx = struct {
@@ -478,8 +1012,11 @@ const Ctx = struct {
     bw: BW,
     br: BR,
     // per-plane scratch: block data is assembled here, then framed as
-    // [mode map][block data] into the main bitstream (v0.4 syntax)
+    // [mode map][block data] into the main bitstream (v0.4 syntax; the
+    // v0.5 entropy gene packs it through the arithmetic coder instead)
     scratch: []u8,
+    // CDEF snapshot buffer (max plane size; frame-atomic filtering)
+    cdef_buf: []u8,
 
     block_src: [64]u8 = @splat(0),
     dct_calls: u64 = 0,
@@ -489,6 +1026,9 @@ const Ctx = struct {
     last_frame_bytes: usize = 0,
     dec_fi: u32 = 0,
     cur_gop: f32 = 0,
+    // decoder-side handle on the current frame's luma recon (CFL source for
+    // chroma planes); set by decodeFrame
+    dec_cur_y: []const u8 = &.{},
     debug_px: bool = false,
 };
 
@@ -563,10 +1103,12 @@ fn encodeFrame(ctx: *Ctx, fi: u32) !void {
     try encodePlane(ctx, fi, is_i, qp, clip.u, ctx.encU, ctx.prevU, clip.w / 2, clip.h / 2, true, refresh, @as(usize, fi) * clip.csz);
     try encodePlane(ctx, fi, is_i, qp, clip.v, ctx.encV, ctx.prevV, clip.w / 2, clip.h / 2, true, refresh, @as(usize, fi) * clip.csz);
 
-    // v0.4 in-loop deblocking: the finished recon frame is smoothed BEFORE it
-    // becomes the next reference and the stored decoder output. Same qp, same
-    // code path on the decoder — can never desynchronize.
+    // v0.4 in-loop deblocking + v0.5 CDEF-lite deringing: the finished recon
+    // frame is filtered BEFORE it becomes the next reference and the stored
+    // decoder output. Same qp, same code path on the decoder — can never
+    // desynchronize.
     deblockFrame(g, ctx.encY, ctx.encU, ctx.encV, clip.w, clip.h, qp);
+    cdefFrame(g, ctx.encY, ctx.encU, ctx.encV, clip.w, clip.h, qp, ctx.cdef_buf);
 
     // swap: enc becomes prev
     const ty = ctx.prevY;
@@ -612,6 +1154,29 @@ fn encodePlane(
     refresh: u32,
     src_base: usize,
 ) !void {
+    // v0.5 entropy gene: comptime-specialized plane body — legacy byte
+    // varints or the adaptive arithmetic coder, one shared source.
+    if (gen.entropyGene(ctx.g) > 0.5) {
+        return encodePlaneT(ctx, fi, is_i, qp, src, enc, prev, pw, ph, chroma, refresh, src_base, true);
+    }
+    return encodePlaneT(ctx, fi, is_i, qp, src, enc, prev, pw, ph, chroma, refresh, src_base, false);
+}
+
+fn encodePlaneT(
+    ctx: *Ctx,
+    fi: u32,
+    is_i: bool,
+    qp: f32,
+    src: []const u8,
+    enc: []u8,
+    prev: []const u8,
+    pw: u32,
+    ph: u32,
+    chroma: bool,
+    refresh: u32,
+    src_base: usize,
+    comptime ac_on: bool,
+) !void {
     const g = ctx.g;
     const cqp_scale = gen.chromaScale(g);
     const iq_scale: f32 = if (chroma) cqp_scale else 1.0;
@@ -621,16 +1186,19 @@ fn encodePlane(
     const rrow: usize = @intCast((fi / refresh) % @max(1, nby));
     const do_refresh = !is_i and !chroma and (fi / refresh) > 0;
     const halfpel = gen.halfPel(g);
+    // CFL reads the co-located luma recon — pre-deblock on BOTH sides.
+    const cfl_luma: ?[]const u8 = if (chroma) ctx.encY else null;
+    const cfl_lpw: usize = ctx.clip.w;
 
     // v0.4 per-plane framing: block data goes to scratch, intra mode codes go
     // to a bit-packed map; the plane lands as [mode map][block data].
-    const modes = intraModes(g);
+    const modes = intraModes(g, chroma);
     const mwidth: u5 = intraModeBits(modes.len);
-    var mmap: [512]u8 = @splat(0);
+    var mmap: [1024]u8 = @splat(0);
     var mbacc: u32 = 0;
     var mbn: u5 = 0;
     var mmap_n: usize = 0; // completed bytes in the mode map
-    var sbw = BW{ .buf = ctx.scratch };
+    var w = BlockW(ac_on).init(ctx.scratch);
     if (modes.len > 1 and (nbx * nby * @as(usize, mwidth) + 7) / 8 > mmap.len) return error.BitstreamOverflow;
 
     var by: usize = 0;
@@ -656,7 +1224,7 @@ fn encodePlane(
             };
 
             if (force_intra) {
-                if (!is_i) sbw.putU8(2); // intra-in-P marker
+                if (!is_i) w.marker(2); // intra-in-P marker
                 var lv: [64]i32 = undefined;
                 if (modes.len == 1) {
                     // legacy: raw block into DCT — no prediction, no mode code
@@ -665,7 +1233,7 @@ fn encodePlane(
                     for (0..64) |k| {
                         if (lv[k] != 0) last = k;
                     }
-                    packPairs(&sbw, lv[0..], last);
+                    w.levels(lv[0..], last);
                     var deq: [64]f32 = undefined;
                     dequantLevels(ctx, &lv, qp, iq_scale, rc, &deq);
                     idct8(&deq, enc[sy * pw + sx ..], pw, &ctx.idct_calls);
@@ -685,7 +1253,7 @@ fn encodePlane(
                     var best_err: u64 = std.math.maxInt(u64);
                     var trial: [64]u8 = undefined;
                     for (modes, 0..) |m, mi| {
-                        intraPredict(m, enc, pw, ph, sx, sy, &trial);
+                        intraPredict(m, enc, pw, ph, sx, sy, &trial, cfl_luma, cfl_lpw);
                         var err: u64 = 0;
                         for (0..64) |k| {
                             const s: i32 = @as(i32, ctx.block_src[k]);
@@ -717,7 +1285,7 @@ fn encodePlane(
                     for (0..64) |k| {
                         if (lv[k] != 0) last = k;
                     }
-                    packPairs(&sbw, lv[0..], last);
+                    w.levels(lv[0..], last);
                     var deq: [64]f32 = undefined;
                     dequantLevels(ctx, &lv, qp, iq_scale, rc, &deq);
                     var rec: [64]u8 = undefined;
@@ -794,16 +1362,15 @@ fn encodePlane(
                     }
                 }
                 if (perpx < skip_th) {
-                    sbw.putU8(1); // skip: cur already == prev copy
+                    w.marker(1); // skip: cur already == prev copy
                 } else {
                     if (subpel != 4) {
-                        sbw.putU8(2); // inter with half-pel refinement
+                        w.marker(2); // inter with half-pel refinement
                     } else {
-                        sbw.putU8(0);
+                        w.marker(0);
                     }
-                    sbw.putSvarint(bdx);
-                    sbw.putSvarint(bdy);
-                    if (subpel != 4) sbw.putU8(subpel);
+                    w.mv(bdx, bdy);
+                    if (subpel != 4) w.subpel(subpel);
                     if (subpel == 4) {
                         var r3: usize = 0;
                         while (r3 < 8) : (r3 += 1) {
@@ -823,7 +1390,7 @@ fn encodePlane(
                     for (0..64) |k| {
                         if (lv[k] != 0) last = k;
                     }
-                    packPairs(&sbw, lv[0..], last);
+                    w.levels(lv[0..], last);
                     // reconstruct: pred + idct(dequant(residual))
                     var deq: [64]f32 = undefined;
                     dequantLevels(ctx, &lv, qp, pq_scale, rc, &deq);
@@ -866,7 +1433,8 @@ fn encodePlane(
         const map_len = (nbx * nby * @as(usize, mwidth) + 7) / 8;
         for (mmap[0..map_len]) |b| ctx.bw.put(b); // zero-padded tail included
     }
-    for (ctx.scratch[0..sbw.n]) |b| ctx.bw.put(b);
+    w.finish();
+    for (ctx.scratch[0..w.written()]) |b| ctx.bw.put(b);
 }
 
 fn sadBlock(a: *const [64]u8, b: []const u8, stride: usize, fast: bool) u64 {
@@ -896,6 +1464,7 @@ fn sadBlock(a: *const [64]u8, b: []const u8, stride: usize, fast: bool) u64 {
 fn decodeFrame(ctx: *Ctx, curY: []u8, curU: []u8, curV: []u8, prevY: []const u8, prevU: []const u8, prevV: []const u8) !void {
     const g = ctx.g;
     const clip = ctx.clip;
+    ctx.dec_cur_y = curY;
     const ftype = try ctx.br.getU8();
     const qp: f32 = @floatFromInt(try ctx.br.getU8());
     const is_i = ftype == 1;
@@ -909,10 +1478,11 @@ fn decodeFrame(ctx: *Ctx, curY: []u8, curU: []u8, curV: []u8, prevY: []const u8,
     try decodePlane(ctx, is_i, qp, curU, prevU, clip.w / 2, clip.h / 2, true, refresh);
     try decodePlane(ctx, is_i, qp, curV, prevV, clip.w / 2, clip.h / 2, true, refresh);
 
-    // v0.4 in-loop deblocking — mirrors encodeFrame exactly: same planes, same
-    // frame qp, same filter. The deblocked frame is the stored output AND the
-    // next frame's reference on both sides.
+    // v0.4 in-loop deblocking + v0.5 CDEF-lite — mirrors encodeFrame exactly:
+    // same planes, same frame qp, same filters. The filtered frame is the
+    // stored output AND the next frame's reference on both sides.
     deblockFrame(g, curY, curU, curV, clip.w, clip.h, qp);
+    cdefFrame(g, curY, curU, curV, clip.w, clip.h, qp, ctx.cdef_buf);
 }
 
 fn decodePlane(
@@ -926,6 +1496,25 @@ fn decodePlane(
     chroma: bool,
     refresh: u32,
 ) !void {
+    // v0.5 entropy gene: comptime-specialized mirror of encodePlane's choice.
+    if (gen.entropyGene(ctx.g) > 0.5) {
+        return decodePlaneT(ctx, is_i, qp, cur, prev, pw, ph, chroma, refresh, true);
+    }
+    return decodePlaneT(ctx, is_i, qp, cur, prev, pw, ph, chroma, refresh, false);
+}
+
+fn decodePlaneT(
+    ctx: *Ctx,
+    is_i: bool,
+    qp: f32,
+    cur: []u8,
+    prev: []const u8,
+    pw: u32,
+    ph: u32,
+    chroma: bool,
+    refresh: u32,
+    comptime ac_on: bool,
+) !void {
     const g = ctx.g;
     const cqp_scale = gen.chromaScale(g);
     const iq_scale: f32 = if (chroma) cqp_scale else 1.0;
@@ -934,18 +1523,24 @@ fn decodePlane(
     const nby: usize = ph / 8;
     const rrow: usize = @intCast((ctx.dec_fi / refresh) % @max(1, nby));
     const do_refresh = !is_i and !chroma and (ctx.dec_fi / refresh) > 0;
+    // CFL reads the co-located luma recon — pre-deblock on BOTH sides.
+    const cfl_luma: ?[]const u8 = if (chroma) ctx.dec_cur_y else null;
+    const cfl_lpw: usize = ctx.clip.w;
 
     // v0.4: the plane's intra mode map precedes the block data — read it once
     // (deterministic length), then decode blocks against it.
-    const modes = intraModes(g);
+    const modes = intraModes(g, chroma);
     const mwidth: u5 = intraModeBits(modes.len);
-    var mmap: [512]u8 = undefined;
+    var mmap: [1024]u8 = undefined;
     var map_br = BR{ .buf = mmap[0..0] };
     if (mwidth > 0) {
         const map_len = (nbx * nby * @as(usize, mwidth) + 7) / 8;
         for (0..map_len) |mi| mmap[mi] = try ctx.br.getU8();
         map_br = .{ .buf = mmap[0..map_len] };
     }
+    // v0.5: the block stream is either byte varints (legacy) or the adaptive
+    // arithmetic coder; both start right after the mode map, byte-aligned.
+    var r = try BlockR(ac_on).init(&ctx.br);
 
     var by: usize = 0;
     while (by < nby) : (by += 1) {
@@ -963,45 +1558,23 @@ fn decodePlane(
             };
 
             if (force_intra) {
-                if (!is_i) _ = try ctx.br.getU8(); // intra-in-P marker
+                if (!is_i) _ = try r.marker(); // intra-in-P marker
                 if (modes.len == 1) {
                     // legacy: no mode byte, raw-DCT recon
-                    const npairs = try ctx.br.getUvarint();
                     var coef: [64]f32 = @splat(0);
-                    var k: u64 = 0;
-                    var i: u64 = 0;
-                    while (i < npairs) : (i += 1) {
-                        const run = try ctx.br.getUvarint();
-                        const lvl = try ctx.br.getSvarint();
-                        k += run;
-                        if (k >= 64) return error.Corrupt;
-                        const lf: f32 = @floatFromInt(lvl);
-                        coef[ZZ[@intCast(k)]] = lf * levelQ(g, qp, iq_scale, @intCast(k), rc);
-                        k += 1;
-                    }
+                    try r.levels(g, qp, iq_scale, rc, &coef);
                     idct8(&coef, cur[sy * pw + sx ..], pw, &ctx.idct_calls);
                 } else {
-                    // v0.4: mode index from the plane's bit-packed map (1-3
+                    // v0.4: mode index from the plane's bit-packed map (1-4
                     // bits), prediction from the decoder's own recon plane
                     // (identical availability, identical pixels).
                     const midx = try map_br.getBits(mwidth);
                     if (midx >= modes.len) return error.Corrupt;
                     const mode = modes[midx];
                     var pred: [64]u8 = undefined;
-                    intraPredict(mode, cur, pw, ph, sx, sy, &pred);
-                    const npairs = try ctx.br.getUvarint();
+                    intraPredict(mode, cur, pw, ph, sx, sy, &pred, cfl_luma, cfl_lpw);
                     var coef: [64]f32 = @splat(0);
-                    var k: u64 = 0;
-                    var i: u64 = 0;
-                    while (i < npairs) : (i += 1) {
-                        const run = try ctx.br.getUvarint();
-                        const lvl = try ctx.br.getSvarint();
-                        k += run;
-                        if (k >= 64) return error.Corrupt;
-                        const lf: f32 = @floatFromInt(lvl);
-                        coef[ZZ[@intCast(k)]] = lf * levelQ(g, qp, iq_scale, @intCast(k), rc);
-                        k += 1;
-                    }
+                    try r.levels(g, qp, iq_scale, rc, &coef);
                     var rec: [64]u8 = undefined;
                     idct8(&coef, rec[0..64], 8, &ctx.idct_calls);
                     const dst = cur[sy * pw + sx ..];
@@ -1013,18 +1586,19 @@ fn decodePlane(
                     }
                 }
             } else {
-                const flags = try ctx.br.getU8();
+                const flags = try r.marker();
                 if (flags == 1) {
                     // skip: cur already copied from prev
                 } else {
-                    const dx = try ctx.br.getSvarint();
-                    const dy = try ctx.br.getSvarint();
+                    const mv2 = try r.mvPair();
+                    const dx = mv2[0];
+                    const dy = mv2[1];
                     rc.mv_n = @min(1.0, (@as(f32, @floatFromInt(@abs(dx))) + @as(f32, @floatFromInt(@abs(dy)))) / 8.0);
                     const ox_i: i32 = @as(i32, @intCast(sx)) + @as(i32, @intCast(dx));
                     const oy_i: i32 = @as(i32, @intCast(sy)) + @as(i32, @intCast(dy));
                     var pred: [64]u8 = undefined;
                     if (flags == 2) {
-                        const code = try ctx.br.getU8();
+                        const code = try r.subpel();
                         const hx = @as(i32, code / 3) - 1;
                         const hy = @as(i32, code % 3) - 1;
                         interpBlock(prev, pw, ph, ox_i, oy_i, hx, hy, &pred);
@@ -1034,19 +1608,8 @@ fn decodePlane(
                             @memcpy(pred[r2 * 8 ..][0..8], prev[@as(usize, @intCast(oy_i + @as(i32, @intCast(r2)))) * pw + @as(usize, @intCast(ox_i)) ..][0..8]);
                         }
                     }
-                    const npairs = try ctx.br.getUvarint();
                     var coef: [64]f32 = @splat(0);
-                    var k: u64 = 0;
-                    var i: u64 = 0;
-                    while (i < npairs) : (i += 1) {
-                        const run = try ctx.br.getUvarint();
-                        const lvl = try ctx.br.getSvarint();
-                        k += run;
-                        if (k >= 64) return error.Corrupt;
-                        const lf: f32 = @floatFromInt(lvl);
-                        coef[ZZ[@intCast(k)]] = lf * levelQ(g, qp, pq_scale, @intCast(k), rc);
-                        k += 1;
-                    }
+                    try r.levels(g, qp, pq_scale, rc, &coef);
                     var rec: [64]u8 = undefined;
                     idct8(&coef, rec[0..64], 8, &ctx.idct_calls);
                     const dst = cur[sy * pw + sx ..];
@@ -1111,6 +1674,7 @@ pub fn evalClip(
         .bw = .{ .buf = bitbuf },
         .br = .{ .buf = "" },
         .scratch = try a.alloc(u8, 1 << 20),
+        .cdef_buf = try a.alloc(u8, clip.ysz),
     };
 
     const t0 = std.Io.Clock.now(.awake, io);
@@ -1222,6 +1786,7 @@ pub fn debugRoundtrip(alloc: std.mem.Allocator, clip: *const yuv.Clip, g: *const
         .bw = .{ .buf = bitbuf },
         .br = .{ .buf = "" },
         .scratch = try a.alloc(u8, 1 << 20),
+        .cdef_buf = try a.alloc(u8, clip.ysz),
     };
 
     var cy = p1Y;
@@ -1318,6 +1883,14 @@ fn genomeWith(id: u64, intra: f32, deb: f32) gen.Genome {
     return g;
 }
 
+fn genomeWithV5(id: u64, intra: f32, deb: f32, entropy: f32, cfl: f32, cdef: f32) gen.Genome {
+    var g = genomeWith(id, intra, deb);
+    g.g[18] = entropy;
+    g.g[19] = cfl;
+    g.g[20] = cdef;
+    return g;
+}
+
 // THE v0.4 invariant: with prediction and/or deblocking enabled, the decoder
 // output must remain byte-exact equal to the encoder recon (closed loop),
 // frame by frame, on every plane. Any drift here is a desync bug.
@@ -1348,28 +1921,143 @@ test "v0.4 closed loop holds with intra prediction and deblocking on" {
     }
 }
 
-// The migration invariant: a genome with the v0.4 genes at 0.0 must take the
-// legacy path — same PSNR/bytes as a genome whose new genes were never set.
-test "v0.4 genes at 0 reproduce legacy metrics exactly" {
+// THE v0.5 invariant: entropy coder, CFL, CDEF, and the smooth/PAETH modes
+// must all hold the closed loop (enc recon == dec output, byte-exact) with
+// every combination of the new features — including all-on.
+test "v0.5 closed loop holds with entropy, CFL, CDEF, smooth/PAETH on" {
+    const alloc = std.testing.allocator;
+    var clip = try synthClip(alloc, 64, 64, 4);
+    defer alloc.free(clip.y);
+    defer alloc.free(clip.u);
+    defer alloc.free(clip.v);
+
+    const variants = [_]gen.Genome{
+        genomeWithV5(21, 0.95, 0.6, 1.0, 0.0, 0.0), // AC stream only
+        genomeWithV5(22, 0.95, 0.6, 0.0, 1.0, 0.0), // CFL only
+        genomeWithV5(23, 0.95, 0.6, 0.0, 0.0, 1.0), // CDEF only
+        genomeWithV5(24, 0.30, 0.0, 1.0, 1.0, 0.0), // legacy intra + AC + CFL
+        genomeWithV5(25, 0.95, 0.6, 1.0, 1.0, 1.0), // everything on
+    };
+    for (&variants) |*g| {
+        var reports = std.ArrayList(DebugReport).empty;
+        defer reports.deinit(alloc);
+        try debugRoundtrip(alloc, &clip, g, .{}, &reports, alloc);
+        try std.testing.expectEqual(@as(usize, 4), reports.items.len);
+        for (reports.items) |r| {
+            try std.testing.expectEqual(@as(i32, -1), r.first_bad_block);
+            try std.testing.expectEqual(@as(u32, 0), r.max_delta);
+            try std.testing.expect(r.enc_y_psnr > 9.0);
+        }
+    }
+}
+
+// The v0.5 migration invariant: v0.4 genomes (new genes at 0) measure
+// byte-exactly the same with the v0.5 binary present — the arena's fitness
+// floor stays comparable across the upgrade.
+test "v0.5 genes at 0 reproduce v0.4 metrics exactly" {
     const alloc = std.testing.allocator;
     var clip = try synthClip(alloc, 32, 32, 4);
     defer alloc.free(clip.y);
     defer alloc.free(clip.u);
     defer alloc.free(clip.v);
 
-    var a = genomeWith(10, 0.0, 0.0);
-    var b = genomeWith(10, 0.0, 0.0);
-    b.g[7] = 0.3; // unrelated gene differs — must not matter to this check
+    var a = genomeWith(10, 0.9, 0.6);
+    var b = genomeWithV5(10, 0.9, 0.6, 0.0, 0.0, 0.0);
     var ra = std.ArrayList(DebugReport).empty;
     defer ra.deinit(alloc);
     var rb = std.ArrayList(DebugReport).empty;
     defer rb.deinit(alloc);
     try debugRoundtrip(alloc, &clip, &a, .{}, &ra, alloc);
     try debugRoundtrip(alloc, &clip, &b, .{}, &rb, alloc);
-    // determinism: identical runs, identical reports
     for (ra.items, rb.items) |x, yv| {
         try std.testing.expectEqual(x.enc_y_psnr, yv.enc_y_psnr);
         try std.testing.expectEqual(x.max_delta, yv.max_delta);
+    }
+}
+
+// The AC engine: byte-exact roundtrip of the full symbol alphabet under
+// adversarial probability drift — markers, MVs, subpel codes, (run,level)
+// pairs, escapes. Any asymmetry between ACEnc and ACDec shows here.
+test "adaptive entropy coder roundtrips symbol streams byte-exactly" {
+    const alloc = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xC0DEC);
+    const rnd = prng.random();
+    var ps: Probs = @splat(PROB_INIT);
+    var ps2: Probs = @splat(PROB_INIT);
+
+    const buf = try alloc.alloc(u8, 1 << 16);
+    defer alloc.free(buf);
+    var ac = ACEnc{ .buf = buf };
+
+    // encode a long randomized symbol sequence
+    var ref_dx: [256]i32 = undefined;
+    var ref_dy: [256]i32 = undefined;
+    var ref_sub: [256]u8 = undefined;
+    var ref_mark: [256]u8 = undefined;
+    var ref_lv: [512]i32 = undefined;
+    var n_lv: usize = 0;
+    for (0..256) |i| {
+        const m: u8 = @intCast(rnd.uintLessThan(u2, 3));
+        ref_mark[i] = m;
+        encMarker(&ac, &ps, m);
+        if (m != 1) {
+            const dx: i32 = @as(i32, rnd.intRangeAtMost(i8, -12, 12));
+            const dy: i32 = @as(i32, rnd.intRangeAtMost(i8, -12, 12));
+            ref_dx[i] = dx;
+            ref_dy[i] = dy;
+            encMV(&ac, &ps, dx);
+            encMV(&ac, &ps, dy);
+            if (m == 2 and i % 3 == 0) {
+                const code: u8 = @intCast(rnd.uintLessThan(u4, 9));
+                ref_sub[i] = code;
+                encUBits(&ac, &ps, CX_SP_B0, 4, code);
+            }
+        }
+        // a level every other iteration (levels 1..8, plus one big escape)
+        if (i % 2 == 0 and n_lv < 510) {
+            var l: i32 = @as(i32, rnd.intRangeAtMost(i8, -8, 8)) + (if (i % 4 == 0) @as(i32, 1) else 0);
+            if (l == 0) l = 1; // levels are nonzero by construction
+            if (i == 100) l = 5000; // exercise the big-escape tier
+            ref_lv[n_lv] = l;
+            acEncLevel(&ac, &ps, l);
+            n_lv += 1;
+        }
+        // drift the probabilities adversarially between symbols — INDEX-based
+        // so the decoder side can reproduce the exact same drift
+        for (0..8) |ci| {
+            pUpdate(&ps[ci], @truncate((i * 7 + ci * 13) & 1));
+        }
+    }
+    ac.flush();
+    try std.testing.expect(ac.n < buf.len);
+
+    // decode and compare
+    const stream: []const u8 = buf[0..ac.n];
+    var br = BR{ .buf = stream };
+    var dec = ACDec{ .br = &br };
+    try dec.init();
+    var out_lv: usize = 0;
+    for (0..256) |i| {
+        const m = try decMarker(&dec, &ps2);
+        try std.testing.expectEqual(ref_mark[i], m);
+        if (m != 1) {
+            const dx = try decMV(&dec, &ps2);
+            const dy = try decMV(&dec, &ps2);
+            try std.testing.expectEqual(ref_dx[i], dx);
+            try std.testing.expectEqual(ref_dy[i], dy);
+            if (m == 2 and i % 3 == 0) {
+                const code = try decUBits(&dec, &ps2, CX_SP_B0, 4);
+                try std.testing.expectEqual(ref_sub[i], @as(u8, @intCast(code)));
+            }
+        }
+        if (i % 2 == 0 and out_lv < n_lv) {
+            const l = try acDecLevel(&dec, &ps2);
+            try std.testing.expectEqual(ref_lv[out_lv], l);
+            out_lv += 1;
+        }
+        for (0..8) |ci| {
+            pUpdate(&ps2[ci], @truncate((i * 7 + ci * 13) & 1));
+        }
     }
 }
 
@@ -1381,12 +2069,12 @@ test "intraPredict vertical copies top row, DC fills flat value" {
         recon[r * 32 + c] = @intCast((r * 7 + c * 3) % 256);
     };
     var out: [64]u8 = undefined;
-    intraPredict(INTRA_VERTICAL, &recon, 32, 32, 8, 8, &out); // top = row 7
+    intraPredict(INTRA_VERTICAL, &recon, 32, 32, 8, 8, &out, null, 0); // top = row 7
     for (0..8) |r| for (0..8) |c| {
         try std.testing.expectEqual(recon[7 * 32 + 8 + c], out[r * 8 + c]);
     };
     var flat: [32 * 32]u8 = @splat(90);
-    intraPredict(INTRA_DC, &flat, 32, 32, 8, 8, &out);
+    intraPredict(INTRA_DC, &flat, 32, 32, 8, 8, &out, null, 0);
     for (out) |px| try std.testing.expectEqual(@as(u8, 90), px);
 }
 

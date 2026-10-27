@@ -100,6 +100,13 @@ def main():
         def fits(c):
             return c.get("metrics", {}).get("psnr", 0) - 14.0 * c.get("metrics", {}).get("bpp", 99)
         cand = max(champs, key=fits)
+        # auditability: stamp the merge-layer exchange-rate fitness so the
+        # stored fit ALWAYS reconciles with the displayed psnr/bpp. The raw
+        # shard-side fitness (measured at the shard's own operating point) is
+        # kept as fit_shard for provenance.
+        cand["fit_merge"] = round(fits(cand), 4)
+        if "fit" in cand:
+            cand["fit_shard"] = cand["fit"]
         hof_p = os.path.join(repo, "halloffame", "champion.json")
         prev = None
         if os.path.exists(hof_p):
@@ -115,9 +122,16 @@ def main():
             hof_champ = cand
             m = cand["metrics"]
             report.append(f"champion: bot {cand['id']} (gen {cand['gen']}, tribe {cand['tribe']}) "
-                          f"psnr={m['psnr']:.2f} bpp={m['bpp']:.4f}")
+                          f"psnr={m['psnr']:.2f} bpp={m['bpp']:.4f} fit={cand['fit_merge']:.4f}")
         else:
             hof_champ = prev
+            # backfill the stamp on the standing champion (one-time)
+            if "fit_merge" not in prev:
+                prev["fit_merge"] = round(fits(prev), 4)
+                if "fit" in prev:
+                    prev["fit_shard"] = prev["fit"]
+                with open(hof_p, "w") as f:
+                    json.dump(prev, f, indent=1)
             m = prev["metrics"]
             report.append(f"champion retained: bot {prev['id']} "
                           f"psnr={m['psnr']:.2f} bpp={m['bpp']:.4f} "
