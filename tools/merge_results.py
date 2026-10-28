@@ -18,6 +18,24 @@ import os
 import sys
 
 
+# Complexity-penalty exchange rates, read from brain/config.json so the merge
+# layer and the evolution brain can never drift apart. Falls back to the
+# v0.5b-era constants if the file is unreadable.
+def load_cfg(repo):
+    defaults = {"lambda": 14.0, "mu_dec": 0.05, "nu_enc": 0.02,
+                "dec_free": 8.0, "enc_free_s": 1.0}
+    p = os.path.join(repo, "brain", "config.json")
+    try:
+        with open(p) as f:
+            raw = json.load(f)
+        for k in defaults:
+            if k in raw:
+                defaults[k] = float(raw[k])
+    except Exception:
+        pass
+    return defaults
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--in-dir", required=True)
@@ -95,16 +113,41 @@ def main():
     # The Hall of Fame keeps the best bot EVER SEEN, not the best of this run:
     # a regression must never dethrone the champion, and the champion-gated
     # issue report must only fire on genuine improvements.
+    #
+    # v0.5c fix (fitness alignment): the merge gate previously compared on the
+    # raw exchange rate psnr - lambda*bpp ONLY, while the scoreboard (and the
+    # shard-side evolution) uses the complexity-penalized fitness from
+    # brain/evolve.py:fitness(). That mismatch let a strictly slower encoder
+    # (enc_ms10 963 -> 1403 at identical psnr/bpp) "win" by +0.0014 and dethrone
+    # a better champion. The gate now scores with the SAME formula the brain
+    # evolves against — one fitness, everywhere.
     report = []
     hof_champ = None
     if champs:
+        cfg = load_cfg(repo)
+
         def fits(c):
-            return c.get("metrics", {}).get("psnr", 0) - 14.0 * c.get("metrics", {}).get("bpp", 99)
+            # Same formula as brain/evolve.py:fitness():
+            #   psnr - lambda*bpp - nu_enc*max(0, enc_ms10/10 - enc_free_s)
+            #        - mu_dec*max(0, dec_mops - dec_free)
+            # Legacy entries without enc/dec metrics fall back to the
+            # quality-only rate rather than inventing complexity numbers
+            # they never had (they predate the complexity counters).
+            m = c.get("metrics", {})
+            score = m.get("psnr", 0) - cfg["lambda"] * m.get("bpp", 99)
+            enc = m.get("enc_ms10")
+            dec = m.get("dec_mops")
+            if enc is not None:
+                score -= cfg["nu_enc"] * max(0.0, enc / 10.0 - cfg["enc_free_s"])
+            if dec is not None:
+                score -= cfg["mu_dec"] * max(0.0, dec - cfg["dec_free"])
+            return score
+
         cand = max(champs, key=fits)
-        # auditability: stamp the merge-layer exchange-rate fitness so the
-        # stored fit ALWAYS reconciles with the displayed psnr/bpp. The raw
-        # shard-side fitness (measured at the shard's own operating point) is
-        # kept as fit_shard for provenance.
+        # auditability: stamp the merge-layer fitness (same penalized formula
+        # as the brain) so the stored fit ALWAYS reconciles with the displayed
+        # psnr/bpp/complexity. The raw shard-side fitness (measured at the
+        # shard's own operating point) is kept as fit_shard for provenance.
         cand["fit_merge"] = round(fits(cand), 4)
         if "fit" in cand:
             cand["fit_shard"] = cand["fit"]
@@ -139,6 +182,7 @@ def main():
                           f"(this run's best, bot {cand['id']}, did not beat it)")
 
     # ---- LEADERBOARD.md ----
+    # (fits() and cfg from the champion block above; one fitness everywhere.)
     lb = ["# Leaderboard", "",
           "Every bot that ever lived in the arena is measured against the same",
           "corpus, the same decoder, the same exchange rate. Champions graduate",
