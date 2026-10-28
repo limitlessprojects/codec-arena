@@ -3452,3 +3452,46 @@ Nothing here is hand-written; nothing here is deleted.
 - gen 10 shard 8 (fit 25.078): intra_gop +0.165
 - gen 27 shard 8 (fit 25.264): refresh +0.122
 - gen 0 shard 9 (fit 22.236): entropy +0.387, dz_dc -0.378, skip +0.306, p_qmul +0.262, mv_dz -0.248
+
+## Merge run 26
+
+- gen 0 shard 3 (fit 23.039): dz_dc -0.414, entropy +0.412, skip +0.364, p_qmul +0.272, keyint -0.263
+- gen 1 shard 3 (fit 25.643): entropy +0.103
+- gen 3 shard 3 (fit 25.656): mv_q +0.09
+- gen 6 shard 3 (fit 25.86): mv_q +0.159
+- gen 7 shard 3 (fit 25.855): mv_q +0.081
+- gen 13 shard 3 (fit 25.952): deadzone +0.094
+- gen 0 shard 4 (fit 22.694): entropy +0.441, dz_dc -0.433, skip +0.375, keyint -0.284, mv_dz -0.266
+- gen 1 shard 4 (fit 22.881): dz_dc -0.095, entropy +0.088
+- gen 7 shard 4 (fit 24.923): adaptq +0.106
+- gen 11 shard 4 (fit 24.981): baseq -0.086
+- gen 12 shard 4 (fit 25.065): baseq -0.084
+- gen 0 shard 5 (fit 22.244): dz_dc -0.465, entropy +0.451, skip +0.363, mv_dz -0.275, q_low -0.266
+- gen 1 shard 5 (fit 23.941): entropy +0.089
+- gen 12 shard 5 (fit 25.138): mv_dz -0.083
+- gen 18 shard 5 (fit 25.15): adaptq +0.081
+- gen 25 shard 5 (fit 25.161): refresh +0.147
+- gen 27 shard 5 (fit 25.232): refresh +0.218
+- gen 0 shard 6 (fit 22.464): dz_dc -0.452, entropy +0.442, skip +0.361, keyint -0.275, mv_dz -0.274
+- gen 4 shard 6 (fit 24.871): mv_dz +0.14
+- gen 7 shard 6 (fit 25.15): deadzone -0.083
+- gen 8 shard 6 (fit 25.03): deadzone -0.092
+- gen 11 shard 6 (fit 25.012): mv_dz -0.105
+- gen 13 shard 6 (fit 25.097): mv_dz +0.102
+- gen 14 shard 6 (fit 25.174): mv_dz -0.112
+- gen 0 shard 7 (fit 22.244): entropy +0.357, dz_dc -0.345, skip +0.327, mv_dz -0.232, intra_pred -0.226
+- gen 5 shard 7 (fit 25.011): mv_q +0.082
+- gen 6 shard 7 (fit 25.023): mv_q +0.11
+- gen 7 shard 7 (fit 24.938): mv_q +0.125
+- gen 8 shard 7 (fit 25.026): mv_q +0.112
+- gen 17 shard 7 (fit 25.077): deadzone +0.113
+- gen 24 shard 7 (fit 25.152): refresh +0.086
+- gen 0 shard 8 (fit 23.984): entropy +0.4, dz_dc -0.375, skip +0.33, p_qmul +0.271, keyint -0.25
+- gen 1 shard 8 (fit 26.212): dz_dc -0.087
+- gen 13 shard 8 (fit 26.745): mv_q +0.111
+- gen 14 shard 8 (fit 26.764): mv_q +0.169
+- gen 15 shard 8 (fit 26.782): mv_q +0.108
+- gen 0 shard 9 (fit 22.456): dz_dc -0.43, entropy +0.415, skip +0.362, mv_dz -0.277, p_qmul +0.268
+- gen 13 shard 9 (fit 25.103): deadzone -0.12
+- gen 14 shard 9 (fit 25.064): deadzone -0.193
+- gen 15 shard 9 (fit 25.109): deadzone -0.132
