@@ -11,20 +11,27 @@
 const std = @import("std");
 const yuv = @import("yuv.zig");
 const gen = @import("genome.zig");
+const msssim = @import("msssim.zig");
 
 pub const EvalOpts = struct {
     fast_sad: bool = true, // sample every 2nd pixel during motion search
+    // v0.6a metric debugging: if set, decoded planes are written here as
+    // DIR/<clip.name>.recon.yuv (planar, loadClip-compatible).
+    dump_recon: ?[]const u8 = null,
 };
 
 pub const ClipStats = struct {
     bytes: u64,
     psnr_y: f32,
-    // v0.5d: chroma visibility. Fitness still selects on psnr_y (protocol
-    // stability — the migration law), but U/V quality is now MEASURED and
-    // reported so the chroma-blind spot (CfL / chroma_q invisibility) can be
-    // analyzed and the v0.6 perceptual/weighted metric can switch on data.
+    // v0.5d: chroma visibility. U/V quality is MEASURED and reported so the
+    // chroma-blind spot (CfL / chroma_q invisibility) can be analyzed.
     psnr_u: f32,
     psnr_v: f32,
+    // v0.6a: perceptual metric (MS-SSIM, Wang 2003) on the Y plane, mean over
+    // frames. The selection signal lives on the MS-SSIM dB scale now
+    // (brain/config.json q_metric); psnr_y stays as the reporting + BD-rate
+    // instrument so anchors stay comparable.
+    msssim_y: f32,
     enc_ms: f32,
     enc_mops: f32, // (dct+idct calls)*64 / 1e6
     dec_mops: f32, // idct calls*64 / 1e6
@@ -569,8 +576,17 @@ fn idct8(coef: *const [64]f32, dst: []u8, stride: usize, idct_calls: *u64) void 
     idct_calls.* += 1;
 }
 
+// v0.6a: uniform quantizer override for RD probing (--qscale). Applied in
+// bandQ — THE single funnel every quant step passes through on BOTH encoder
+// and decoder — so the two sides can never disagree by construction. 1.0 =
+// off, bit-identical behavior. This is the honest operating-point knob the
+// RD sweep should use: sweeping a single co-adapted gene (baseq) desyncs the
+// quantizer stack and produces non-monotonic junk curves (seen on champion
+// 170007151: 27.7 dB @ 0.225 bpp vs 31.7 dB @ 0.181 bpp).
+pub var qscale_override: f32 = 1.0;
+
 fn bandQ(qp: f32, scale: f32) f32 {
-    return @max(1.0, qp * scale);
+    return @max(1.0, qp * scale * qscale_override);
 }
 
 fn quantLevel(c: f32, q: f32, dz: f32, dith: f32) i32 {
@@ -657,19 +673,16 @@ fn clamp255(v: i32) u8 {
 
 /// Horizontal half sample at (x + 1/2, y).
 inline fn halfH(prev: []const u8, pw: usize, ph: usize, x: i32, y: i32) i32 {
-    return halfT4(atClamp(prev, pw, ph, x - 1, y), atClamp(prev, pw, ph, x, y),
-        atClamp(prev, pw, ph, x + 1, y), atClamp(prev, pw, ph, x + 2, y));
+    return halfT4(atClamp(prev, pw, ph, x - 1, y), atClamp(prev, pw, ph, x, y), atClamp(prev, pw, ph, x + 1, y), atClamp(prev, pw, ph, x + 2, y));
 }
 /// Vertical half sample at (x, y + 1/2).
 inline fn halfV(prev: []const u8, pw: usize, ph: usize, x: i32, y: i32) i32 {
-    return halfT4(atClamp(prev, pw, ph, x, y - 1), atClamp(prev, pw, ph, x, y),
-        atClamp(prev, pw, ph, x, y + 1), atClamp(prev, pw, ph, x, y + 2));
+    return halfT4(atClamp(prev, pw, ph, x, y - 1), atClamp(prev, pw, ph, x, y), atClamp(prev, pw, ph, x, y + 1), atClamp(prev, pw, ph, x, y + 2));
 }
 /// Diagonal half sample at (x + 1/2, y + 1/2): vertical 4-tap of the
 /// horizontal half plane (canonical order, identical enc/dec).
 inline fn halfD(prev: []const u8, pw: usize, ph: usize, x: i32, y: i32) i32 {
-    return halfT4(halfH(prev, pw, ph, x, y - 1), halfH(prev, pw, ph, x, y),
-        halfH(prev, pw, ph, x, y + 1), halfH(prev, pw, ph, x, y + 2));
+    return halfT4(halfH(prev, pw, ph, x, y - 1), halfH(prev, pw, ph, x, y), halfH(prev, pw, ph, x, y + 1), halfH(prev, pw, ph, x, y + 2));
 }
 
 /// Quarter-pel prediction block: samples the reference at
@@ -2008,23 +2021,34 @@ pub fn evalClip(
     var acc: f32 = 0;
     var acc_u: f32 = 0;
     var acc_v: f32 = 0;
+    var acc_ms: f32 = 0;
     for (0..clip.frames) |fi| {
         const s = clip.frameY(@intCast(fi));
         const d = decY[@as(usize, fi) * clip.ysz ..][0..clip.ysz];
         acc += yuv.psnrPlane(s, d);
-        acc_u += yuv.psnrPlane(clip.frameU(@intCast(fi)),
-                               decU[@as(usize, fi) * clip.csz ..][0..clip.csz]);
-        acc_v += yuv.psnrPlane(clip.frameV(@intCast(fi)),
-                               decV[@as(usize, fi) * clip.csz ..][0..clip.csz]);
+        acc_u += yuv.psnrPlane(clip.frameU(@intCast(fi)), decU[@as(usize, fi) * clip.csz ..][0..clip.csz]);
+        acc_v += yuv.psnrPlane(clip.frameV(@intCast(fi)), decV[@as(usize, fi) * clip.csz ..][0..clip.csz]);
+        acc_ms += try msssim.planeMsssim(alloc, s, d, clip.w, clip.h);
     }
     const nframes = @as(f32, @floatFromInt(clip.frames));
     const mean_psnr = acc / nframes;
+
+    if (opts.dump_recon) |rd_dir| {
+        std.Io.Dir.cwd().createDirPath(io, rd_dir) catch {};
+        const rp = try std.fmt.allocPrint(alloc, "{s}/{s}.recon.yuv", .{ rd_dir, clip.name });
+        const rf = try std.Io.Dir.cwd().createFile(io, rp, .{});
+        defer rf.close(io);
+        try rf.writeStreamingAll(io, decY);
+        try rf.writeStreamingAll(io, decU);
+        try rf.writeStreamingAll(io, decV);
+    }
 
     return .{
         .bytes = bitstream.len,
         .psnr_y = mean_psnr,
         .psnr_u = acc_u / nframes,
         .psnr_v = acc_v / nframes,
+        .msssim_y = acc_ms / nframes,
         .enc_ms = @as(f32, @floatFromInt(enc_ns)) / 1e6,
         .enc_mops = @as(f32, @floatFromInt(ctx.dct_calls + ctx.idct_calls)) * 64.0 / 1e6,
         .dec_mops = @as(f32, @floatFromInt(ctx.idct_calls)) * 64.0 / 1e6,

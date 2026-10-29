@@ -1,11 +1,13 @@
 {
-  "lambda": 14.0,
-  "mu_dec": 0.05,
-  "nu_enc": 0.02,
-  "dec_free": 8.0,
-  "enc_free_s": 1.0,
-  "sigma0": 0.22,
-  "sigma_decay": 0.93,
-  "jump_p": 0.02,
-  "rd_multipliers": [0.55, 0.7, 0.85, 1.0, 1.2, 1.45, 1.75]
+ "lambda": 14.0,
+ "msssim_lambda": 3.5,
+ "q_metric": "msssim_db",
+ "mu_dec": 0.013,
+ "nu_enc": 0.005,
+ "dec_free": 8.0,
+ "enc_free_s": 1.0,
+ "sigma0": 0.22,
+ "sigma_decay": 0.93,
+ "jump_p": 0.02,
+ "rd_qscale": [0.6, 0.8, 1.0, 1.25, 1.5, 1.8, 2.2, 2.8, 3.5]
 }

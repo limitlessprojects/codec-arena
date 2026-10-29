@@ -6,7 +6,12 @@ uniform crossover + gaussian mutation with annealed sigma + rare big jumps.
 The Zig binary (arena) is the oracle: it encodes+decodes the corpus for every
 bot and reports PSNR / bitrate / complexity. Fitness is computed here.
 
-  score = psnr - LAMBDA * bpp - MU * dec_mops - NU * enc_ms
+  score = q - LAMBDA * bpp - MU * dec_mops - NU * enc_ms
+
+  v0.6a: q is the perceptual quality on the MS-SSIM dB scale (mean of
+  per-clip dB, measured by the Zig oracle) when q_metric=msssim_db;
+  LAMBDA then means msssim_lambda. Falls back to PSNR + lambda for rows
+  from an old binary. PSNR stays the reporting + BD-rate instrument.
 
 LAMBDA is "the exchange rate between bits and distortion" — the market price
 a bot pays for quality. Everything else is bookkeeping.
@@ -95,13 +100,15 @@ def genome_line(g):
         f"{x:.4f}" for x in g["g"])
 
 
-def run_eval(zig_bin, corpus, pop, out_csv, fast=True):
+def run_eval(zig_bin, corpus, pop, out_csv, fast=True, qscale=None):
     with open(out_csv + ".pop", "w") as f:
         for g in pop:
             f.write(genome_line(g) + "\n")
     cmd = [zig_bin, "eval", "--corpus", corpus, "--pop", out_csv + ".pop", "--out", out_csv]
     if not fast:
         cmd.append("--slow")
+    if qscale is not None and abs(qscale - 1.0) > 1e-9:
+        cmd += ["--qscale", f"{qscale:.4f}"]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stderr, file=sys.stderr)
@@ -116,18 +123,36 @@ def run_eval(zig_bin, corpus, pop, out_csv, fast=True):
                 "psnr": float(t[1]), "bpp": float(t[2]),
                 "enc_ms10": float(t[3]), "dec_mops": float(t[4]),
             }
-            # v0.5d: optional chroma columns (psnr_u, psnr_v) — reported only;
-            # fitness still selects on psnr_y until the v0.6 metric switch.
+            # v0.5d: optional chroma columns (psnr_u, psnr_v) — reported only.
             if len(t) >= 7:
                 r["psnr_u"] = float(t[5])
                 r["psnr_v"] = float(t[6])
+            # v0.6a: perceptual columns. msssim = mean M (human report);
+            # msssim_db = mean of per-clip MS-SSIM dB (THE selection signal).
+            if len(t) >= 8:
+                r["msssim"] = float(t[7])
+            if len(t) >= 9:
+                r["msssim_db"] = float(t[8])
             res[int(t[0])] = r
     os.remove(out_csv + ".pop")
     return res
 
 
+def quality_db(r, cfg):
+    """v0.6a perceptual metric switch. Selection lives on the MS-SSIM dB
+    scale (mean of per-clip dB, measured by the Zig oracle). Falls back to
+    PSNR for rows from an old binary (no msssim_db column). Returns
+    (quality_db, perceptual_flag) so the rate lambda can match the scale."""
+    m = r.get("msssim_db")
+    if cfg.get("q_metric", "msssim_db") == "msssim_db" and m is not None:
+        return m, True
+    return r["psnr"], False
+
+
 def fitness(g, r, cfg):
-    score = r["psnr"] - cfg["lambda"] * r["bpp"]
+    q, perceptual = quality_db(r, cfg)
+    lam = cfg["msssim_lambda"] if perceptual else cfg["lambda"]
+    score = q - lam * r["bpp"]
     score -= cfg["mu_dec"] * max(0.0, r["dec_mops"] - cfg["dec_free"])
     score -= cfg["nu_enc"] * max(0.0, r["enc_ms10"] / 10.0 - cfg["enc_free_s"])
     return score
@@ -466,9 +491,9 @@ def main():
     r = res[champ["id"]]
     with open(os.path.join(args.out_dir, "leaderboard.md"), "w") as f:
         f.write(f"| {args.shard} | {champ['id']} | {champ['gen']} | {champ['tribe']} | "
-                f"{r['psnr']:.2f} | {r['bpp']:.4f} | {champ['fit']:.3f} |\n")
+                f"{r['psnr']:.2f} | {r['bpp']:.4f} | {r.get('msssim_db', 0.0):.4f} | {champ['fit']:.3f} |\n")
 
-    # RD sweep of champion: scale the baseq gene, re-evaluate
+    # RD sweep of champion: uniform qscale override, re-evaluate
     anchor_psnr = None
     if os.path.exists(args.anchor):
         with open(args.anchor) as f:
@@ -476,16 +501,21 @@ def main():
         anchor_psnr = base.get("target_psnr")
     rd_points = []
     if args.rd_sweep and anchor_psnr:
-        for m in cfg.get("rd_multipliers", [0.6, 0.75, 0.9, 1.0, 1.15, 1.35, 1.6]):
+        # v0.6a: sweep the UNIFORM --qscale override instead of the baseq
+        # gene. Sweeping a single co-adapted gene desyncs the quantizer stack
+        # and produced non-monotonic junk curves (champion 170007151: 27.7 dB
+        # @ 0.225 bpp vs 31.7 dB @ 0.181 bpp). qscale passes through bandQ on
+        # BOTH sides — the honest operating-point knob.
+        for m in cfg.get("rd_qscale", [0.6, 0.8, 1.0, 1.25, 1.5, 1.8, 2.2, 2.8, 3.5]):
             gg = dict(champ)
             gg["g"] = list(champ["g"])
-            gg["g"][3] = clamp01(champ["g"][3] * m)
             gg["id"] = champ["id"]
             rr = run_eval(args.zig, args.corpus, [gg],
-                          os.path.join(args.out_dir, "rd.csv"))
+                          os.path.join(args.out_dir, "rd.csv"), qscale=m)
             rr = rr[champ["id"]]
             n_evals += 1
-            rd_points.append({"mult": m, "psnr": rr["psnr"], "bpp": rr["bpp"]})
+            rd_points.append({"qscale": m, "psnr": rr["psnr"], "bpp": rr["bpp"],
+                              "msssim_db": rr.get("msssim_db")})
         # pick point closest to anchor PSNR from above-or-near
         best_pt = min(rd_points, key=lambda p: abs(p["psnr"] - anchor_psnr))
         with open(os.path.join(args.out_dir, "rd.json"), "w") as f:

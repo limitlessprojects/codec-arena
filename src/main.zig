@@ -9,6 +9,7 @@ const yuv = @import("yuv.zig");
 const gen = @import("genome.zig");
 const codec = @import("codec.zig");
 const screen = @import("screen.zig");
+const msssim = @import("msssim.zig");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -59,6 +60,8 @@ pub fn main(init: std.process.Init) !void {
         var pop_path: []const u8 = "pop/seed.txt";
         var out_path: []const u8 = "results.csv";
         var fast = true;
+        var qscale: f32 = 1.0;
+        var dump_recon: ?[]const u8 = null;
         var i: usize = 2;
         while (i < args.items.len) : (i += 1) {
             if (std.mem.eql(u8, args.items[i], "--corpus") and i + 1 < args.items.len) {
@@ -72,14 +75,46 @@ pub fn main(init: std.process.Init) !void {
                 out_path = args.items[i];
             } else if (std.mem.eql(u8, args.items[i], "--slow")) {
                 fast = false;
+            } else if (std.mem.eql(u8, args.items[i], "--qscale") and i + 1 < args.items.len) {
+                // v0.6a: uniform quantizer override for honest RD sweeps.
+                i += 1;
+                qscale = try std.fmt.parseFloat(f32, args.items[i]);
+            } else if (std.mem.eql(u8, args.items[i], "--dump-recon") and i + 1 < args.items.len) {
+                // metric debugging: write decoded YUV planes per clip
+                i += 1;
+                dump_recon = args.items[i];
             }
         }
-        try evalAll(alloc, io, corpus_dir, pop_path, out_path, fast);
+        codec.qscale_override = qscale;
+        try evalAll(alloc, io, corpus_dir, pop_path, out_path, fast, dump_recon);
         return;
     }
 
     if (std.mem.eql(u8, args.items[1], "screen")) {
         try screenCmd(alloc, io, args.items[2..]);
+        return;
+    }
+
+    if (std.mem.eql(u8, args.items[1], "msssimcheck")) {
+        // arena msssimcheck PAIRS.bin  — cross-validation vs tools/ref_msssim.py.
+        // Records: u32 w, u32 h, w*h bytes A, w*h bytes B. Prints one value per line.
+        const dir2 = std.Io.Dir.cwd();
+        const data = try dir2.readFileAlloc(io, args.items[2], alloc, .limited(1 << 28));
+        var off: usize = 0;
+        while (off + 8 <= data.len) {
+            const w = std.mem.readInt(u32, data[off..][0..4], .little);
+            const h = std.mem.readInt(u32, data[off + 4 ..][0..4], .little);
+            off += 8;
+            const n = @as(usize, w) * @as(usize, h);
+            if (off + 2 * n > data.len) break;
+            const a = data[off .. off + n];
+            const b = data[off + n .. off + 2 * n];
+            off += 2 * n;
+            const v = try msssim.planeMsssim(alloc, a, b, w, h);
+            var buf2: [64]u8 = undefined;
+            const s = try std.fmt.bufPrint(&buf2, "{d:.6}\n", .{v});
+            try std.Io.File.stdout().writeStreamingAll(io, s);
+        }
         return;
     }
 
@@ -184,6 +219,7 @@ fn evalAll(
     pop_path: []const u8,
     out_path: []const u8,
     fast: bool,
+    dump_recon: ?[]const u8,
 ) !void {
     const dir = std.Io.Dir.cwd();
 
@@ -236,10 +272,12 @@ fn evalAll(
         var acc_psnr: f32 = 0;
         var acc_psnr_u: f32 = 0;
         var acc_psnr_v: f32 = 0;
+        var acc_msssim: f32 = 0;
+        var acc_ms_db: f32 = 0;
         var failed = false;
 
         for (clips.items) |*clip| {
-            const st = codec.evalClip(alloc, io, clip, &g, .{ .fast_sad = fast }) catch |e| {
+            const st = codec.evalClip(alloc, io, clip, &g, .{ .fast_sad = fast, .dump_recon = dump_recon }) catch |e| {
                 std.debug.print("[evalClip error: {any} clip={s}]\n", .{ e, clip.name });
                 failed = true;
                 break;
@@ -248,6 +286,15 @@ fn evalAll(
             acc_psnr += st.psnr_y;
             acc_psnr_u += st.psnr_u;
             acc_psnr_v += st.psnr_v;
+            acc_msssim += st.msssim_y;
+            // v0.6a: fitness-grade aggregation — per-clip MS-SSIM on the dB
+            // scale, THEN averaged. mean-of-M saturates near 1 and lets one
+            // broken clip anchor the mean; dB-per-clip keeps differences
+            // discriminative (Wang's own reporting convention).
+            {
+                const m = @min(@max(st.msssim_y, 1e-6), 1.0 - 1e-9);
+                acc_ms_db += @floatCast(-10.0 * @log10(1.0 - m));
+            }
             tot_enc_mops += st.enc_mops;
             tot_dec_mops += st.dec_mops;
             tot_enc_ms += st.enc_ms;
@@ -264,9 +311,10 @@ fn evalAll(
         const psnr_v = acc_psnr_v / nclips;
         const bpp = @as(f64, @floatFromInt(tot_bytes)) * 8.0 / @as(f64, @floatFromInt(tot_px));
 
-        // v0.5d: two appended columns (psnr_u, psnr_v). Consumers must parse
+        // v0.6a: two appended columns (msssim = mean M for humans, msssim_db
+        // = mean of per-clip dB = the selection signal). Consumers must parse
         // with len >= 5; the first five columns are byte-identical to v0.5c.
-        const line_out = try std.fmt.bufPrint(&wbuf, "{d},{d:.2},{d:.4},{d:.1},{d:.2},{d:.2},{d:.2}\n", .{
+        const line_out = try std.fmt.bufPrint(&wbuf, "{d},{d:.2},{d:.4},{d:.1},{d:.2},{d:.2},{d:.2},{d:.5},{d:.4}\n", .{
             g.id,
             psnr,
             bpp,
@@ -274,6 +322,8 @@ fn evalAll(
             tot_dec_mops,
             psnr_u,
             psnr_v,
+            acc_msssim / nclips,
+            acc_ms_db / nclips,
         });
         try out_file.writeStreamingAll(io, line_out);
         n_ok += 1;

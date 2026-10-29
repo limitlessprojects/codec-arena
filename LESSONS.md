@@ -3920,3 +3920,41 @@ Nothing here is hand-written; nothing here is deleted.
 - gen 12 shard 8 (fit 25.289): deadzone +0.106, q_high +0.097
 - gen 0 shard 9 (fit 22.422): entropy +0.454, dz_dc -0.418, skip +0.361, refresh +0.317, deadzone +0.29
 - gen 13 shard 9 (fit 26.03): entropy -0.083
+
+## v0.6a — the perceptual metric switch (2026-10-29)
+
+**Selection now lives on the MS-SSIM dB scale, not PSNR.** At 0.18bpp PSNR
+rewards blur; MS-SSIM re-steepens the gradient where the arena was stuck.
+
+1. `src/msssim.zig`: Wang 2003, 11-tap gaussian sigma=1.5, valid-mode,
+   2x2 box downsample, 5 scales, f32 filters + f64 map means. Cross-validated
+   against a textbook numpy reference (`tools/ref_msssim.py --dump` +
+   `arena msssimcheck`) to 5 DECIMALS on 8 cases including noise sweeps.
+   A first draft had a ReleaseFast-only segfault: multi-object `for (x, sq)`
+   iterating an original-size buffer against a current-scale slice — UB when
+   lengths diverge at scale 2+. Slice explicitly.
+2. **Aggregation law: mean of per-clip dB, never dB of mean-M.** dB(mean(M)) !=
+   mean(dB(M)) (Jensen) — the merge gate now prefers the oracle's stored
+   `msssim_db` and only recomputes from M for pre-v0.6a stamps. The gate/brain
+   drift that v0.5c fixed is structurally impossible again.
+3. **PSNR was hiding a structural bug.** Champion 170007151 on `grid`: even
+   frames 99 dB (perfect), odd frames 11-27 dB (motion search fails on the
+   scrolling checkerboard — aliasing). Mean PSNR 58.55 said "lossless";
+   MS-SSIM 0.823 says "broken every other frame". `tools/inspect_recon.py`
+   tells frames apart. Fix belongs to the v0.8 inter/intra work.
+4. **The old RD sweep swept a co-adapted gene.** Moving baseq alone off its
+   evolved point desyncs the quantizer stack: 27.7 dB @ 0.225 bpp vs 31.7 dB
+   @ 0.181 bpp — junk. New `--qscale` override funnels through bandQ on BOTH
+   sides (desync impossible by construction); RD curves are honest now.
+5. **lambda re-priced from measurement** (`tools/calibrate_lambda.py`): the
+   champion's own frontier gives ~0.315 ms-ssim-dB per 0.0816 bpp ->
+   break-even lambda ~3.5-3.9; kept 3.5. Complexity penalties rescaled by the
+   quality-range ratio (8.49/31.69): nu_enc 0.02->0.005, mu_dec 0.05->0.013 —
+   same RELATIVE speed pressure, new absolute scale.
+6. **Era migration law:** cross-era (psnr vs msssim) fitness comparisons are
+   incomparable; the merge gate refuses to dethrone across eras and demands
+   an explicit re-stamp. Champion 170007151 re-stamped: msssim_db 8.4855,
+   fit_merge 7.3117, fit_ver v0.6a-msssim (CI timings preserved). The watcher
+   reads fit_merge and treats a fit_ver change as re-anchor, not regression.
+   Retention suite extended to 17 asserts (T8 blur-sneak on the new scale,
+   T9 cross-era guard): ALL PASS.

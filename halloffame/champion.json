@@ -40,7 +40,9 @@
   "psnr": 31.69,
   "bpp": 0.1811,
   "enc_ms10": 943.6,
-  "dec_mops": 13.63
+  "dec_mops": 13.63,
+  "msssim": 0.81498,
+  "msssim_db": 8.4855
  },
  "canalization": {
   "canalization_median_delta": 0.1132,
@@ -48,6 +50,7 @@
   "worst_gene": "keyint",
   "worst_delta": -5.532
  },
- "fit_merge": 27.0059,
- "fit_shard": 27.0059
+ "fit_merge": 7.3117,
+ "fit_shard": 27.0059,
+ "fit_ver": "v0.6a-msssim"
 }

@@ -14,6 +14,7 @@ report to stdout for the CI to turn into an issue.
 import argparse
 import glob
 import json
+import math
 import os
 import sys
 
@@ -22,7 +23,8 @@ import sys
 # layer and the evolution brain can never drift apart. Falls back to the
 # v0.5b-era constants if the file is unreadable.
 def load_cfg(repo):
-    defaults = {"lambda": 14.0, "mu_dec": 0.05, "nu_enc": 0.02,
+    defaults = {"lambda": 14.0, "msssim_lambda": 3.5, "q_metric": "msssim_db",
+                "mu_dec": 0.013, "nu_enc": 0.005,
                 "dec_free": 8.0, "enc_free_s": 1.0}
     p = os.path.join(repo, "brain", "config.json")
     try:
@@ -30,10 +32,15 @@ def load_cfg(repo):
             raw = json.load(f)
         for k in defaults:
             if k in raw:
-                defaults[k] = float(raw[k])
+                defaults[k] = raw[k] if k == "q_metric" else float(raw[k])
     except Exception:
         pass
     return defaults
+
+
+def msssim_db(m):
+    """Mean per-clip MS-SSIM (in M units) -> dB scale, clamped."""
+    return -10.0 * math.log10(max(1e-9, min(1.0 - 1e-9, 1.0 - m)))
 
 
 def main():
@@ -127,14 +134,28 @@ def main():
         cfg = load_cfg(repo)
 
         def fits(c):
-            # Same formula as brain/evolve.py:fitness():
-            #   psnr - lambda*bpp - nu_enc*max(0, enc_ms10/10 - enc_free_s)
-            #        - mu_dec*max(0, dec_mops - dec_free)
-            # Legacy entries without enc/dec metrics fall back to the
-            # quality-only rate rather than inventing complexity numbers
-            # they never had (they predate the complexity counters).
+            # Same formula as brain/evolve.py:fitness() (v0.6a): quality on
+            # the MS-SSIM dB scale minus the rate/complexity penalties.
+            # Legacy entries without the msssim column fall back to PSNR +
+            # lambda (their era's scale); entries without enc/dec metrics
+            # fall back to the quality-only rate rather than inventing
+            # complexity numbers they never had.
             m = c.get("metrics", {})
-            score = m.get("psnr", 0) - cfg["lambda"] * m.get("bpp", 99)
+            # ONE FITNESS EVERYWHERE: prefer the oracle-computed fitness-grade
+            # msssim_db (mean of per-clip dB); dB(mean(M)) != mean(dB(M)) —
+            # recomputing from the mean-M column would reintroduce the v0.5c
+            # gate/brain drift. The msssim->dB path is only for champions
+            # stamped before the msssim_db column existed.
+            ms_db = m.get("msssim_db")
+            if ms_db is None and m.get("msssim") is not None:
+                ms_db = msssim_db(m["msssim"])
+            if cfg.get("q_metric") == "msssim_db" and ms_db is not None:
+                q = ms_db
+                lam = cfg["msssim_lambda"]
+            else:
+                q = m.get("psnr", 0)
+                lam = cfg["lambda"]
+            score = q - lam * m.get("bpp", 99)
             enc = m.get("enc_ms10")
             dec = m.get("dec_mops")
             if enc is not None:
@@ -159,14 +180,31 @@ def main():
                     prev = json.load(f)
             except Exception:
                 prev = None
-        if prev is None or fits(cand) > fits(prev):
+        # v0.6a migration law: PSNR-era and MS-SSIM-era fitness live on
+        # different scales. A cross-era comparison must never silently
+        # dethrone (the numbers are incomparable); the incumbent keeps the
+        # seat until an explicit re-stamp migrates it to the new scale.
+        def era(c):
+            m = c.get("metrics", {})
+            return "msssim" if (m.get("msssim_db") is not None or m.get("msssim") is not None) else "psnr"
+        cross_era = prev is not None and era(cand) != era(prev)
+        if cross_era:
+            report.append(f"WARNING: metric-era mismatch — standing champion {prev['id']} "
+                          f"({era(prev)}-era) vs candidate {cand['id']} ({era(cand)}-era): "
+                          f"fitness scales are incomparable, candidate cannot dethrone. "
+                          f"Re-stamp the champion to migrate eras.")
+        if prev is None or (not cross_era and fits(cand) > fits(prev)):
             os.makedirs(os.path.dirname(hof_p), exist_ok=True)
             with open(hof_p, "w") as f:
                 json.dump(cand, f, indent=1)
             hof_champ = cand
             m = cand["metrics"]
+            ms_db = m.get("msssim_db")
+            if ms_db is None and m.get("msssim") is not None:
+                ms_db = msssim_db(m["msssim"])
+            ms_s = f" msssim_db={ms_db:.4f}" if ms_db is not None else ""
             report.append(f"champion: bot {cand['id']} (gen {cand['gen']}, tribe {cand['tribe']}) "
-                          f"psnr={m['psnr']:.2f} bpp={m['bpp']:.4f} fit={cand['fit_merge']:.4f}")
+                          f"psnr={m['psnr']:.2f} bpp={m['bpp']:.4f}{ms_s} fit={cand['fit_merge']:.4f}")
         else:
             hof_champ = prev
             # backfill the stamp on the standing champion (one-time)
@@ -177,8 +215,10 @@ def main():
                 with open(hof_p, "w") as f:
                     json.dump(prev, f, indent=1)
             m = prev["metrics"]
+            ms = m.get("msssim")
+            ms_s = f" msssim={ms:.4f}" if ms is not None else ""
             report.append(f"champion retained: bot {prev['id']} "
-                          f"psnr={m['psnr']:.2f} bpp={m['bpp']:.4f} "
+                          f"psnr={m['psnr']:.2f} bpp={m['bpp']:.4f}{ms_s} "
                           f"(this run's best, bot {cand['id']}, did not beat it)")
 
     # ---- Pareto front archive (v0.5d) ----
@@ -243,11 +283,12 @@ def main():
         lb.append("")
     if champs:
         lb += ["## Shard champions (this run)", "",
-               "| shard | bot | gen | tribe | psnr | bpp |", "|---|---|---|---|---|---|"]
+               "| shard | bot | gen | tribe | psnr | bpp | ms-ssim |", "|---|---|---|---|---|---|---|"]
         for c in sorted(champs, key=lambda c: -fits(c))[:20]:
             m = c["metrics"]
+            ms = m.get("msssim") or 0.0
             lb.append(f"| {c['shard']} | {c['id']} | {c['gen']} | {c['tribe']} | "
-                      f"{m['psnr']:.2f} | {m['bpp']:.4f} |")
+                      f"{m['psnr']:.2f} | {m['bpp']:.4f} | {ms:.4f} |")
         lb.append("")
         if base and base.get("target_psnr") and hof_champ is not None:
             c = hof_champ
