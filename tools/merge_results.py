@@ -23,11 +23,13 @@ import sys
 # layer and the evolution brain can never drift apart. Falls back to the
 # v0.5b-era constants if the file is unreadable.
 def load_cfg(repo):
-    # Defaults mirror the v0.5c/v0.6a rates (lambda=14 on the PSNR scale;
-    # mu_dec/nu_enc = the v0.5c complexity penalties). A repo config.json
-    # overrides every rate, so the merge layer and the brain can never drift.
+    # Defaults mirror the deployed v0.6a rates (brain/config.json): lambda=14
+    # on the PSNR scale, msssim_lambda=3.5 on the dB scale, complexity
+    # penalties rescaled for the dB era (mu_dec 0.013 / nu_enc 0.005). A repo
+    # config.json overrides every rate, so the merge layer and the brain can
+    # never drift; these fallbacks exist for config-less/legacy repos.
     defaults = {"lambda": 14.0, "msssim_lambda": 3.5, "q_metric": "msssim_db",
-                "mu_dec": 0.05, "nu_enc": 0.02,
+                "mu_dec": 0.013, "nu_enc": 0.005,
                 "dec_free": 8.0, "enc_free_s": 1.0}
     p = os.path.join(repo, "brain", "config.json")
     try:
@@ -197,20 +199,16 @@ def main():
         cross_era = prev is not None and era(cand) != era(prev)
         dethrone = prev is None or (not cross_era and fits(cand) > fits(prev))
         if cross_era:
-            # v0.6a migration law (v2): the scales are incomparable, so the
-            # old era cannot be "beaten" — it is ARCHIVED verbatim and the
-            # first new-era candidate re-baselines the hall of fame. The
-            # archive keeps the old era inspectable (and BD-rate-able) forever.
-            arch = os.path.join(repo, "halloffame", f"champion_{era(prev)}.json")
-            os.makedirs(os.path.dirname(arch), exist_ok=True)
-            with open(arch, "w") as f:
-                json.dump(prev, f, indent=1)
-            report.append(f"METRIC SWITCH RE-BASELINE: standing champion {prev['id']} "
-                          f"({era(prev)}-era, fit {fits(prev):.4f} on its own scale) "
-                          f"archived to {os.path.basename(arch)}; candidate {cand['id']} "
-                          f"({era(cand)}-era) re-baselines the hall of fame. No "
-                          f"cross-era dethroning claim is made — the scales differ.")
-            dethrone = True
+            # v0.6a era migration law (deployed design): cross-era fitness
+            # scales are incomparable, so the candidate CANNOT dethrone — the
+            # incumbent keeps the seat and the mismatch is flagged loudly.
+            # Migration is an explicit re-measurement event: the champion is
+            # re-run under the new metric and re-stamped (fit_ver), after
+            # which same-era gating resumes (see docs/ROADMAP_V06.md).
+            report.append(f"WARNING: metric-era mismatch — standing champion {prev['id']} "
+                          f"({era(prev)}-era) vs candidate {cand['id']} ({era(cand)}-era): "
+                          f"fitness scales are incomparable, candidate cannot dethrone. "
+                          f"Re-measure and re-stamp the champion (fit_ver) to migrate eras.")
         if dethrone:
             os.makedirs(os.path.dirname(hof_p), exist_ok=True)
             with open(hof_p, "w") as f:
