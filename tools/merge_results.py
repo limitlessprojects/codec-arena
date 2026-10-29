@@ -23,13 +23,19 @@ import sys
 # layer and the evolution brain can never drift apart. Falls back to the
 # v0.5b-era constants if the file is unreadable.
 def load_cfg(repo):
+    # Defaults mirror the v0.5c/v0.6a rates (lambda=14 on the PSNR scale;
+    # mu_dec/nu_enc = the v0.5c complexity penalties). A repo config.json
+    # overrides every rate, so the merge layer and the brain can never drift.
     defaults = {"lambda": 14.0, "msssim_lambda": 3.5, "q_metric": "msssim_db",
-                "mu_dec": 0.013, "nu_enc": 0.005,
+                "mu_dec": 0.05, "nu_enc": 0.02,
                 "dec_free": 8.0, "enc_free_s": 1.0}
     p = os.path.join(repo, "brain", "config.json")
     try:
         with open(p) as f:
             raw = json.load(f)
+        # metric (v0.6a canonical key) aliases into q_metric.
+        if "metric" in raw:
+            defaults["q_metric"] = raw["metric"]
         for k in defaults:
             if k in raw:
                 defaults[k] = raw[k] if k == "q_metric" else float(raw[k])
@@ -39,8 +45,9 @@ def load_cfg(repo):
 
 
 def msssim_db(m):
-    """Mean per-clip MS-SSIM (in M units) -> dB scale, clamped."""
-    return -10.0 * math.log10(max(1e-9, min(1.0 - 1e-9, 1.0 - m)))
+    """Mean per-clip MS-SSIM (in M units) -> dB scale, clamped so M=1 maps
+    to exactly 60 dB — same clamp as brain/evolve.py:msssim_db."""
+    return -10.0 * math.log10(max(1e-6, min(1.0 - 1e-6, 1.0 - m)))
 
 
 def main():
@@ -182,18 +189,29 @@ def main():
                 prev = None
         # v0.6a migration law: PSNR-era and MS-SSIM-era fitness live on
         # different scales. A cross-era comparison must never silently
-        # dethrone (the numbers are incomparable); the incumbent keeps the
-        # seat until an explicit re-stamp migrates it to the new scale.
+        # dethrone (the numbers are incomparable); the incumbent is archived
+        # to halloffame/champion_<era>.json and the new era re-baselines.
         def era(c):
             m = c.get("metrics", {})
             return "msssim" if (m.get("msssim_db") is not None or m.get("msssim") is not None) else "psnr"
         cross_era = prev is not None and era(cand) != era(prev)
+        dethrone = prev is None or (not cross_era and fits(cand) > fits(prev))
         if cross_era:
-            report.append(f"WARNING: metric-era mismatch — standing champion {prev['id']} "
-                          f"({era(prev)}-era) vs candidate {cand['id']} ({era(cand)}-era): "
-                          f"fitness scales are incomparable, candidate cannot dethrone. "
-                          f"Re-stamp the champion to migrate eras.")
-        if prev is None or (not cross_era and fits(cand) > fits(prev)):
+            # v0.6a migration law (v2): the scales are incomparable, so the
+            # old era cannot be "beaten" — it is ARCHIVED verbatim and the
+            # first new-era candidate re-baselines the hall of fame. The
+            # archive keeps the old era inspectable (and BD-rate-able) forever.
+            arch = os.path.join(repo, "halloffame", f"champion_{era(prev)}.json")
+            os.makedirs(os.path.dirname(arch), exist_ok=True)
+            with open(arch, "w") as f:
+                json.dump(prev, f, indent=1)
+            report.append(f"METRIC SWITCH RE-BASELINE: standing champion {prev['id']} "
+                          f"({era(prev)}-era, fit {fits(prev):.4f} on its own scale) "
+                          f"archived to {os.path.basename(arch)}; candidate {cand['id']} "
+                          f"({era(cand)}-era) re-baselines the hall of fame. No "
+                          f"cross-era dethroning claim is made — the scales differ.")
+            dethrone = True
+        if dethrone:
             os.makedirs(os.path.dirname(hof_p), exist_ok=True)
             with open(hof_p, "w") as f:
                 json.dump(cand, f, indent=1)

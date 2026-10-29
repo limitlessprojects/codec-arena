@@ -19,13 +19,26 @@ Usage:  python3 tools/pareto.py --repo . --champions shard dirs... (or import)
 import json, os
 
 
+def _qaxis(c):
+    """The record's quality axis: (name, value). v0.6a records carry the
+    fitness-grade msssim_db (mean of per-clip dB); older msssim-era records
+    may only have mean-M; PSNR-era records have neither."""
+    m = c["metrics"]
+    if m.get("msssim_db") is not None:
+        return ("msssim_db", m["msssim_db"])
+    if m.get("msssim") is not None:
+        return ("msssim", m["msssim"])
+    return ("psnr", m.get("psnr", 0))
+
+
 def _axes(c):
     """Objective vector per record: (name, direction) with direction +1 max / -1 min.
     Legacy records (no complexity metrics) only claim the quality/bits axes.
-    v0.6a: the quality axis is the record's own era — msssim when the record
-    carries it, psnr otherwise (PSNR-era numbers are not MS-SSIM numbers)."""
+    v0.6a: the quality axis is the record's own era — msssim_db/msssim when
+    the record carries it, psnr otherwise (PSNR-era numbers are not MS-SSIM
+    numbers)."""
     m = c["metrics"]
-    q = "msssim" if "msssim" in m else "psnr"
+    q, _ = _qaxis(c)
     ax = [(q, 1), ("bpp", -1)]
     if "enc_ms10" in m:
         ax.append(("enc_ms10", -1))
@@ -42,11 +55,11 @@ def dominates(a, b):
     psnr/bpp, faster encode must dominate).
     v0.6a: records from different metric eras are INCOMPARABLE on quality —
     neither dominates the other (an MS-SSIM number cannot beat a PSNR number)."""
-    aa, ba = dict(_axes(a)), dict(_axes(b))
-    qa = "msssim" if "msssim" in a["metrics"] else "psnr"
-    qb = "msssim" if "msssim" in b["metrics"] else "psnr"
+    qa, _ = _qaxis(a)
+    qb, _ = _qaxis(b)
     if qa != qb:
         return False
+    aa, ba = dict(_axes(a)), dict(_axes(b))
     shared = [k for k in aa if k in ba]
     ge = all((a["metrics"][k] - b["metrics"][k]) * aa[k] >= 0 for k in shared)
     gt = any((a["metrics"][k] - b["metrics"][k]) * aa[k] > 0 for k in shared)
@@ -99,13 +112,10 @@ def update_archive(repo, new_champs):
 def leaderboard_section(front):
     lines = ["## The Pareto front (non-dominated champions ever)", "",
              "| bot | quality | metric | bpp | enc_ms10 | dec_mops |", "|---|---|---|---|---|---|"]
-    for c in sorted(front, key=lambda c: -(c["metrics"].get("msssim") or c["metrics"].get("psnr", 0))):
+    for c in sorted(front, key=lambda c: -_qaxis(c)[1]):
         m = c["metrics"]
-        if "msssim" in m:
-            q, met = f"{m['msssim']:.4f}", "msssim"
-        else:
-            q, met = f"{m.get('psnr', 0):.2f}", "psnr"
-        lines.append(f"| {c['id']} | {q} | {met} | {m.get('bpp', 0):.4f} | "
+        qname, qval = _qaxis(c)
+        lines.append(f"| {c['id']} | {qval:.4f} | {qname} | {m.get('bpp', 0):.4f} | "
                      f"{m.get('enc_ms10', '—')} | {m.get('dec_mops', '—')} |")
     lines.append("")
     lines.append("A bot on this line is unbeatable on at least one trade-off axis —")

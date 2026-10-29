@@ -9,9 +9,11 @@ bot and reports PSNR / bitrate / complexity. Fitness is computed here.
   score = q - LAMBDA * bpp - MU * dec_mops - NU * enc_ms
 
   v0.6a: q is the perceptual quality on the MS-SSIM dB scale (mean of
-  per-clip dB, measured by the Zig oracle) when q_metric=msssim_db;
-  LAMBDA then means msssim_lambda. Falls back to PSNR + lambda for rows
-  from an old binary. PSNR stays the reporting + BD-rate instrument.
+  per-clip dB, measured by the Zig oracle) when metric=msssim_db (legacy
+  key q_metric honored); LAMBDA is the exchange rate on the ACTIVE scale
+  (config lambda, recalibrated 14 -> 8 for the dB scale). Falls back to
+  PSNR + lambda for rows from an old binary. PSNR stays the reporting +
+  BD-rate instrument.
 
 LAMBDA is "the exchange rate between bits and distortion" — the market price
 a bot pays for quality. Everything else is bookkeeping.
@@ -150,20 +152,50 @@ def pick_subset(pool, k, seed, shard, gen):
     return sorted(sub_rng.sample(pool, k))
 
 
+def wants_msssim(cfg):
+    """The metric switch (v0.6a). True = selection lives on the MS-SSIM dB
+    scale. Key precedence: metric > q_metric (legacy) > msssim_db."""
+    key = cfg.get("metric") or cfg.get("q_metric") or "msssim_db"
+    return key == "msssim_db"
+
+
+def msssim_db(m):
+    """Mean per-clip MS-SSIM (M in [0,1]) -> dB scale, clamped so M=1 maps
+    to exactly 60 dB (the q_ceiling neighborhood), never to infinity."""
+    return -10.0 * math.log10(max(1e-6, min(1.0 - 1e-6, 1.0 - m)))
+
+
+def quality(r, cfg):
+    """Scalar selection quality in dB for one eval row (v0.6a): the
+    fitness-grade msssim_db column when present; champions stamped before
+    that column existed carry only the mean-M msssim -> converted here
+    (dB(mean(M)) != mean(dB(M)); conversion path is legacy-only); rows
+    from a pre-msssim oracle or a psnr-metric config fall back to PSNR."""
+    if wants_msssim(cfg):
+        m = r.get("msssim_db")
+        if m is not None:
+            return float(m)
+        mm = r.get("msssim")
+        if mm is not None:
+            return msssim_db(mm)
+    return float(r["psnr"])
+
+
 def quality_db(r, cfg):
-    """v0.6a perceptual metric switch. Selection lives on the MS-SSIM dB
-    scale (mean of per-clip dB, measured by the Zig oracle). Falls back to
-    PSNR for rows from an old binary (no msssim_db column). Returns
-    (quality_db, perceptual_flag) so the rate lambda can match the scale."""
-    m = r.get("msssim_db")
-    if cfg.get("q_metric", "msssim_db") == "msssim_db" and m is not None:
-        return m, True
-    return r["psnr"], False
+    """Back-compat wrapper: (quality, perceptual_flag) so the caller can
+    match the rate lambda to the active scale."""
+    q = quality(r, cfg)
+    perceptual = wants_msssim(cfg) and (r.get("msssim_db") is not None
+                                        or r.get("msssim") is not None)
+    return q, perceptual
 
 
 def fitness(g, r, cfg):
     q, perceptual = quality_db(r, cfg)
-    lam = cfg["msssim_lambda"] if perceptual else cfg["lambda"]
+    # One exchange rate, on the active scale: config lambda (recalibrated
+    # 14 -> 8 when the dB scale became the selection instrument). The
+    # msssim_lambda override is honored only if a config still carries it.
+    lam = cfg.get("msssim_lambda", cfg["lambda"]) if perceptual else cfg["lambda"]
     score = q - lam * r["bpp"]
     score -= cfg["mu_dec"] * max(0.0, r["dec_mops"] - cfg["dec_free"])
     score -= cfg["nu_enc"] * max(0.0, r["enc_ms10"] / 10.0 - cfg["enc_free_s"])
@@ -572,7 +604,7 @@ def main():
 
     with open(os.path.join(args.out_dir, "champion.json"), "w") as f:
         cj = {"shard": args.shard,
-              "metric": cfg.get("q_metric", "psnr"),
+              "metric": cfg.get("metric") or cfg.get("q_metric") or "psnr",
               "corpus_tag": cfg.get("corpus_tag", "v05"),
               **champ, "metrics": res[champ["id"]]}
         if probe:
