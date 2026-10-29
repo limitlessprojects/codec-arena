@@ -61,6 +61,7 @@ pub fn main(init: std.process.Init) !void {
         var out_path: []const u8 = "results.csv";
         var fast = true;
         var qscale: f32 = 1.0;
+        var clips_path: []const u8 = ""; // v0.7 rotation subset filter
         var dump_recon: ?[]const u8 = null;
         var i: usize = 2;
         while (i < args.items.len) : (i += 1) {
@@ -73,6 +74,10 @@ pub fn main(init: std.process.Init) !void {
             } else if (std.mem.eql(u8, args.items[i], "--out") and i + 1 < args.items.len) {
                 i += 1;
                 out_path = args.items[i];
+            } else if (std.mem.eql(u8, args.items[i], "--clips") and i + 1 < args.items.len) {
+                // v0.7: subset filter, one clip name per line (rotation protocol)
+                i += 1;
+                clips_path = args.items[i];
             } else if (std.mem.eql(u8, args.items[i], "--slow")) {
                 fast = false;
             } else if (std.mem.eql(u8, args.items[i], "--qscale") and i + 1 < args.items.len) {
@@ -86,7 +91,7 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         codec.qscale_override = qscale;
-        try evalAll(alloc, io, corpus_dir, pop_path, out_path, fast, dump_recon);
+        try evalAll(alloc, io, corpus_dir, pop_path, out_path, clips_path, fast, dump_recon);
         return;
     }
 
@@ -140,7 +145,7 @@ pub fn main(init: std.process.Init) !void {
 fn usage() void {
     std.debug.print(
         \\arena — evolutionary codec arena evaluator
-        \\  eval --corpus DIR --pop FILE --out FILE [--slow]
+        \\  eval --corpus DIR --pop FILE --out FILE [--clips FILE] [--slow]
         \\  screen --model FILE --elites POPFILE --out POPFILE --count-out FILE
         \\         --lambda N --keep K --seed S [--threads T] [--sigma F] [--jump F] [--imm F]
         \\  psnr A.yuv B.yuv W H FRAMES
@@ -218,6 +223,7 @@ fn evalAll(
     corpus_dir: []const u8,
     pop_path: []const u8,
     out_path: []const u8,
+    clips_path: []const u8,
     fast: bool,
     dump_recon: ?[]const u8,
 ) !void {
@@ -245,6 +251,24 @@ fn evalAll(
         try clips.append(alloc, clip);
     }
     if (clips.items.len == 0) return error.NoClips;
+
+    // v0.7: optional subset filter — one clip name per line. Used by the
+    // rotation protocol (search sees a rotating pool subset; crowning evals
+    // see everything incl. holdout). Absent/empty file = all clips.
+    if (clips_path.len > 0) {
+        const list_txt = try dir.readFileAlloc(io, clips_path, alloc, .limited(1 << 16));
+        var keep = std.ArrayList(yuv.Clip).empty;
+        var lit = std.mem.tokenizeAny(u8, list_txt, "\n");
+        while (lit.next()) |lraw| {
+            const lname = std.mem.trim(u8, lraw, " \t\r");
+            if (lname.len == 0 or lname[0] == '#') continue;
+            for (clips.items) |clip| {
+                if (std.mem.eql(u8, clip.name, lname)) try keep.append(alloc, clip);
+            }
+        }
+        if (keep.items.len == 0) return error.NoClipsMatched;
+        clips = keep;
+    }
 
     const pop_txt = try dir.readFileAlloc(io, pop_path, alloc, .limited(1 << 24));
     const out_file = try dir.createFile(io, out_path, .{});

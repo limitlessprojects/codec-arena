@@ -21,9 +21,12 @@ import json, os
 
 def _axes(c):
     """Objective vector per record: (name, direction) with direction +1 max / -1 min.
-    Legacy records (no complexity metrics) only claim the quality/bits axes."""
+    Legacy records (no complexity metrics) only claim the quality/bits axes.
+    v0.6a: the quality axis is the record's own era — msssim when the record
+    carries it, psnr otherwise (PSNR-era numbers are not MS-SSIM numbers)."""
     m = c["metrics"]
-    ax = [("psnr", 1), ("bpp", -1)]
+    q = "msssim" if "msssim" in m else "psnr"
+    ax = [(q, 1), ("bpp", -1)]
     if "enc_ms10" in m:
         ax.append(("enc_ms10", -1))
     if "dec_mops" in m:
@@ -36,8 +39,14 @@ def dominates(a, b):
     (legacy entries are never dominated on axes they never had). Standard rule:
     a >= b on EVERY shared axis and a > b on at least one — ties broken by any
     strictly-better axis count as domination (the v0.5c bug case: equal
-    psnr/bpp, faster encode must dominate)."""
+    psnr/bpp, faster encode must dominate).
+    v0.6a: records from different metric eras are INCOMPARABLE on quality —
+    neither dominates the other (an MS-SSIM number cannot beat a PSNR number)."""
     aa, ba = dict(_axes(a)), dict(_axes(b))
+    qa = "msssim" if "msssim" in a["metrics"] else "psnr"
+    qb = "msssim" if "msssim" in b["metrics"] else "psnr"
+    if qa != qb:
+        return False
     shared = [k for k in aa if k in ba]
     ge = all((a["metrics"][k] - b["metrics"][k]) * aa[k] >= 0 for k in shared)
     gt = any((a["metrics"][k] - b["metrics"][k]) * aa[k] > 0 for k in shared)
@@ -89,10 +98,14 @@ def update_archive(repo, new_champs):
 
 def leaderboard_section(front):
     lines = ["## The Pareto front (non-dominated champions ever)", "",
-             "| bot | psnr | bpp | enc_ms10 | dec_mops |", "|---|---|---|---|---|"]
-    for c in sorted(front, key=lambda c: -c["metrics"].get("psnr", 0)):
+             "| bot | quality | metric | bpp | enc_ms10 | dec_mops |", "|---|---|---|---|---|---|"]
+    for c in sorted(front, key=lambda c: -(c["metrics"].get("msssim") or c["metrics"].get("psnr", 0))):
         m = c["metrics"]
-        lines.append(f"| {c['id']} | {m.get('psnr', 0):.2f} | {m.get('bpp', 0):.4f} | "
+        if "msssim" in m:
+            q, met = f"{m['msssim']:.4f}", "msssim"
+        else:
+            q, met = f"{m.get('psnr', 0):.2f}", "psnr"
+        lines.append(f"| {c['id']} | {q} | {met} | {m.get('bpp', 0):.4f} | "
                      f"{m.get('enc_ms10', '—')} | {m.get('dec_mops', '—')} |")
     lines.append("")
     lines.append("A bot on this line is unbeatable on at least one trade-off axis —")

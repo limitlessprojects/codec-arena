@@ -100,7 +100,7 @@ def genome_line(g):
         f"{x:.4f}" for x in g["g"])
 
 
-def run_eval(zig_bin, corpus, pop, out_csv, fast=True, qscale=None):
+def run_eval(zig_bin, corpus, pop, out_csv, fast=True, qscale=None, clip_list=None):
     with open(out_csv + ".pop", "w") as f:
         for g in pop:
             f.write(genome_line(g) + "\n")
@@ -109,6 +109,9 @@ def run_eval(zig_bin, corpus, pop, out_csv, fast=True, qscale=None):
         cmd.append("--slow")
     if qscale is not None and abs(qscale - 1.0) > 1e-9:
         cmd += ["--qscale", f"{qscale:.4f}"]
+    if clip_list:
+        # v0.7 rotation protocol: restrict the eval to a pool subset
+        cmd += ["--clips", clip_list]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stderr, file=sys.stderr)
@@ -136,6 +139,15 @@ def run_eval(zig_bin, corpus, pop, out_csv, fast=True, qscale=None):
             res[int(t[0])] = r
     os.remove(out_csv + ".pop")
     return res
+
+
+def pick_subset(pool, k, seed, shard, gen):
+    """The v0.7 rotation sampler: k pool clips for this (shard, gen), fully
+    deterministic in (seed, shard, gen) so any run can replay any generation's
+    eval set. Holdout clips are excluded by construction (never in the pool —
+    see the corpus parsing in main())."""
+    sub_rng = random.Random(f"{seed}-{shard}-{gen}")
+    return sorted(sub_rng.sample(pool, k))
 
 
 def quality_db(r, cfg):
@@ -246,6 +258,9 @@ def main():
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--config", default="brain/config.json")
     ap.add_argument("--anchor", default="benchmarks/baseline.json")
+    ap.add_argument("--eval-k", type=int, default=0,
+                    help="pool clips per generation (0 = config eval_subset.k; "
+                         "k >= pool size disables rotation)")
     ap.add_argument("--screens", type=int, default=0,
                     help="surrogate screens per generation (0 = legacy GA path)")
     ap.add_argument("--keep", type=int, default=0,
@@ -262,6 +277,27 @@ def main():
     with open(args.config) as f:
         cfg = json.load(f)
     rng = random.Random(args.seed * 1000003 + args.shard)
+
+    # ---- v0.7 corpus rotation setup -------------------------------------
+    # Search evaluates a rotating subset of the POOL each generation (seeded,
+    # deterministic); the HOLDOUT clips are never evaluated during search.
+    # The end-of-run crowning evals (final population, canalization probe, RD
+    # sweep) run on the FULL corpus incl. holdout, so champion.json metrics
+    # are cross-shard comparable and holdout-honest.
+    holdout = set(cfg.get("holdout", []))
+    pool = []
+    spec_p = os.path.join(args.corpus, "corpus.txt")
+    if os.path.exists(spec_p):
+        with open(spec_p) as f:
+            for line in f:
+                t = line.split()
+                if t and t[0] not in holdout:
+                    pool.append(t[0])
+    eval_k = args.eval_k if args.eval_k > 0 else int(cfg.get("eval_subset", {}).get("k", 0))
+    rotate = 0 < eval_k < len(pool)
+    if rotate:
+        print(f"[shard {args.shard}] rotation ON: {eval_k}/{len(pool)} pool clips "
+              f"per gen; holdout {sorted(holdout)} reserved for crowning", flush=True)
 
     start_path = args.pop_file or "pop/seed.txt"
     population = load_pop(start_path)
@@ -301,8 +337,16 @@ def main():
 
     for gen in range(args.gens):
         t0 = time.time()
+        clip_list = None
+        if rotate:
+            subset = pick_subset(pool, eval_k, args.seed, args.shard, gen)
+            clip_list = os.path.join(args.out_dir, f"clipset_g{gen}.txt")
+            with open(clip_list, "w") as f:
+                f.write("\n".join(subset) + "\n")
+            with open(os.path.join(args.out_dir, "clipsets.jsonl"), "a") as cf:
+                cf.write(json.dumps({"gen": gen, "clips": subset}) + "\n")
         res = run_eval(args.zig, args.corpus, population,
-                       os.path.join(args.out_dir, "res.csv"))
+                       os.path.join(args.out_dir, "res.csv"), clip_list=clip_list)
         n_evals += len(population)
         for g in population:
             r = res.get(g["id"])
@@ -318,6 +362,7 @@ def main():
         history.append({"gen": gen, "best": best["fit"],
                         "psnr": best.get("psnr", res[best["id"]]["psnr"]),
                         "bpp": res[best["id"]]["bpp"],
+                        "msssim_db": res[best["id"]].get("msssim_db"),
                         "mean": mean_fit})
 
         # lessons: how do winners differ from the median bot?
@@ -420,7 +465,10 @@ def main():
 
     all_csv.close()
 
-    # final eval of last population (so results match the exported pop)
+    # ---- CROWNING EVAL (v0.7): the final population is measured on the FULL
+    # corpus — pool + holdout, no subset filter. These are the numbers the
+    # merge gate compares across shards; holdout clips were never part of any
+    # selection decision, so the champion's score is a generalization score.
     res = run_eval(args.zig, args.corpus, population,
                    os.path.join(args.out_dir, "res_final.csv"))
     n_evals += len(population)
@@ -523,7 +571,10 @@ def main():
                        "champion": best_pt, "curve": rd_points}, f, indent=1)
 
     with open(os.path.join(args.out_dir, "champion.json"), "w") as f:
-        cj = {"shard": args.shard, **champ, "metrics": res[champ["id"]]}
+        cj = {"shard": args.shard,
+              "metric": cfg.get("q_metric", "psnr"),
+              "corpus_tag": cfg.get("corpus_tag", "v05"),
+              **champ, "metrics": res[champ["id"]]}
         if probe:
             cj["canalization"] = probe
         json.dump(cj, f, indent=1)

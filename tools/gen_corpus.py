@@ -130,6 +130,117 @@ def clip_grain(rng):
     return frames
 
 
+# ---- v0.7 additions (generated AFTER the legacy five, same shared rng, so
+# the legacy clips stay byte-identical; determinism sealed) ----
+
+def clip_text(rng):
+    """Screen-like content: scrolling glyph cells on a flat backdrop. Hard
+    edges + flat regions punish the blur-friendly strategy PSNR rewards —
+    the exact trap v0.6a's metric switch targets."""
+    glyphs = [[rng.random() < 0.55 for _ in range(20)] for _ in range(8)]
+    frames = []
+    for t in range(FRAMES):
+        y = bytearray()
+        shift = (t * 3) % 40
+        for r in range(H):
+            band = r // 24
+            for c in range(W):
+                col = (c + shift) // 20
+                cell_r = r % 24
+                cell_c = (c + shift) % 20
+                on = glyphs[(band * 3 + col) % 8][col % 20]
+                if on and cell_r in (3, 4, 9, 10, 15, 16) and cell_c in (2, 3, 6, 7, 10, 11, 14):
+                    y.append(235)  # stroke
+                elif on:
+                    y.append(45)  # ink body
+                else:
+                    y.append(128 if band % 2 == 0 else 60)  # backdrop
+        frames.append(y)
+    return frames
+
+
+def clip_zoom(rng):
+    """Radial zoom over a bilinear base field — true SUBPEL motion. Stresses
+    the interpolation lattice (halfpel/qpel genes finally get real work)."""
+    base = [[rng.random() for _ in range(80)] for _ in range(48)]
+    frames = []
+    for t in range(FRAMES):
+        z = 1.0 + 0.35 * (t / FRAMES)
+        cx0, cy0 = W / 2.0, H / 2.0
+        y = bytearray()
+        for r in range(H):
+            for c in range(W):
+                fx = (c - cx0) / z + cx0
+                fy = (r - cy0) / z + cy0
+                fx = (fx * 0.25) % 79.0
+                fy = (fy * 0.25) % 47.0
+                x0, y0 = int(fx), int(fy)
+                tx, ty = fx - x0, fy - y0
+                x1, y1 = (x0 + 1) % 80, (y0 + 1) % 48
+                a = base[y0][x0] * (1 - tx) + base[y0][x1] * tx
+                b = base[y1][x0] * (1 - tx) + base[y1][x1] * tx
+                v = a * (1 - ty) + b * ty
+                checker = ((x0 // 4 + y0 // 4) % 2) * 0.4
+                y.append(max(0, min(255, int(255 * (0.3 + 0.5 * v + checker * (v - 0.5))))))
+        frames.append(y)
+    return frames
+
+
+def clip_edge(rng):
+    """Rotating diagonal bars — strong directional structure. Should reward
+    directional intra prediction (and expose its absence)."""
+    frames = []
+    for t in range(FRAMES):
+        y = bytearray()
+        ang = 2 * math.pi * t / FRAMES
+        for r in range(H):
+            for c in range(W):
+                proj = (c - W / 2) * math.cos(ang) + (r - H / 2) * math.sin(ang)
+                v = 128 + 90 * math.sin(proj * 0.22)
+                if abs(math.sin(proj * 0.22)) > 0.93:
+                    v = 255 if v > 128 else 0  # crisp edge lines
+                y.append(max(0, min(255, int(v))))
+        frames.append(y)
+    return frames
+
+
+def clip_haze(rng):
+    """HOLDOUT: layered translucent fog drifting over a smooth gradient.
+    Soft, low-contrast, slow — generalization probe the GA never sees."""
+    layers = [[(rng.random(), rng.random()) for _ in range(2)] for _ in range(3)]
+    frames = []
+    for t in range(FRAMES):
+        y = bytearray()
+        for r in range(H):
+            for c in range(W):
+                v = 60 + 70 * r / H
+                for li in range(3):
+                    p = layers[li]
+                    fx = (c * 0.01 + t * (0.05 + 0.03 * li) * (1 if p[0][0] > 0.5 else -1)) % 2
+                    fy = (r * 0.01 + t * 0.02 * (1 if p[0][1] > 0.5 else -1)) % 2
+                    wgt = 12 * (li + 1) / 3
+                    v += wgt * (0.5 + 0.5 * math.sin(6.28 * fx + p[1][0] * 6.28)) * (0.5 + 0.5 * math.sin(6.28 * fy + p[1][1] * 6.28))
+                y.append(max(0, min(255, int(v))))
+        frames.append(y)
+    return frames
+
+
+def clip_pulse(rng):
+    """HOLDOUT: concentric rings pulsing radially — temporal contrast
+    oscillation with no translation at all (motion search is a trap here)."""
+    frames = []
+    for t in range(FRAMES):
+        y = bytearray()
+        phase = 2 * math.pi * t / FRAMES
+        for r in range(H):
+            for c in range(W):
+                d = math.sqrt((c - W / 2) ** 2 + (r - H / 2) ** 2)
+                v = 128 + 80 * math.sin(d * 0.3 - 3 * phase) * math.exp(-d / 200)
+                y.append(max(0, min(255, int(v))))
+        frames.append(y)
+    return frames
+
+
 def chroma_from_luma(y_frames):
     us, vs = [], []
     for y in y_frames:
@@ -149,12 +260,25 @@ def chroma_from_luma(y_frames):
 
 
 CLIPS = [
+    # legacy five (byte-identical since v0.1 — rng order matters)
     ("drift", clip_drift),
     ("grid", clip_grid),
     ("storm", clip_storm),
     ("quake", clip_quake),
     ("grain", clip_grain),
+    # v0.7 pool additions (more content diversity = weaker memorization)
+    ("text", clip_text),
+    ("zoom", clip_zoom),
+    ("edge", clip_edge),
+    # v0.7 holdout (evolution NEVER evaluates these; crowning evals do)
+    ("haze", clip_haze),
+    ("pulse", clip_pulse),
 ]
+
+# The rotation protocol (brain/config.json): search-time evals sample k of
+# the POOL clips per generation; haze/pulse are excluded from every search
+# eval and measured only by the end-of-run crowning pass.
+HOLDOUT = ["haze", "pulse"]
 
 
 def main():
