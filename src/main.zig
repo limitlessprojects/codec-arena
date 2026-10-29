@@ -36,12 +36,20 @@ pub fn main(init: std.process.Init) !void {
         const a = try yuv.loadClip(alloc, io, args.items[2], "a", w, h, frames, 24);
         const b = try yuv.loadClip(alloc, io, args.items[3], "b", w, h, frames, 24);
         var acc: f32 = 0;
+        var acc_u: f32 = 0;
+        var acc_v: f32 = 0;
         for (0..frames) |i| {
             acc += yuv.psnrPlane(a.frameY(@intCast(i)), b.frameY(@intCast(i)));
+            acc_u += yuv.psnrPlane(a.frameU(@intCast(i)), b.frameU(@intCast(i)));
+            acc_v += yuv.psnrPlane(a.frameV(@intCast(i)), b.frameV(@intCast(i)));
         }
-        const mean = acc / @as(f32, @floatFromInt(frames));
-        var buf: [64]u8 = undefined;
-        const s = try std.fmt.bufPrint(&buf, "{d:.4}\n", .{mean});
+        const nframes: f32 = @floatFromInt(frames);
+        const mean = acc / nframes;
+        const mean_u = acc_u / nframes;
+        const mean_v = acc_v / nframes;
+        var buf: [96]u8 = undefined;
+        // v0.5d: "Y U V" (anchor.py parses all three; first value unchanged)
+        const s = try std.fmt.bufPrint(&buf, "{d:.4} {d:.4} {d:.4}\n", .{ mean, mean_u, mean_v });
         try std.Io.File.stdout().writeStreamingAll(io, s);
         return;
     }
@@ -226,6 +234,8 @@ fn evalAll(
         var tot_dec_mops: f32 = 0;
         var tot_enc_ms: f32 = 0;
         var acc_psnr: f32 = 0;
+        var acc_psnr_u: f32 = 0;
+        var acc_psnr_v: f32 = 0;
         var failed = false;
 
         for (clips.items) |*clip| {
@@ -236,6 +246,8 @@ fn evalAll(
             };
             tot_bytes += st.bytes;
             acc_psnr += st.psnr_y;
+            acc_psnr_u += st.psnr_u;
+            acc_psnr_v += st.psnr_v;
             tot_enc_mops += st.enc_mops;
             tot_dec_mops += st.dec_mops;
             tot_enc_ms += st.enc_ms;
@@ -248,14 +260,20 @@ fn evalAll(
         }
         const nclips: f32 = @floatFromInt(clips.items.len);
         const psnr = acc_psnr / nclips;
+        const psnr_u = acc_psnr_u / nclips;
+        const psnr_v = acc_psnr_v / nclips;
         const bpp = @as(f64, @floatFromInt(tot_bytes)) * 8.0 / @as(f64, @floatFromInt(tot_px));
 
-        const line_out = try std.fmt.bufPrint(&wbuf, "{d},{d:.2},{d:.4},{d:.1},{d:.2}\n", .{
+        // v0.5d: two appended columns (psnr_u, psnr_v). Consumers must parse
+        // with len >= 5; the first five columns are byte-identical to v0.5c.
+        const line_out = try std.fmt.bufPrint(&wbuf, "{d},{d:.2},{d:.4},{d:.1},{d:.2},{d:.2},{d:.2}\n", .{
             g.id,
             psnr,
             bpp,
             tot_enc_ms * 10.0,
             tot_dec_mops,
+            psnr_u,
+            psnr_v,
         });
         try out_file.writeStreamingAll(io, line_out);
         n_ok += 1;

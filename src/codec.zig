@@ -19,6 +19,12 @@ pub const EvalOpts = struct {
 pub const ClipStats = struct {
     bytes: u64,
     psnr_y: f32,
+    // v0.5d: chroma visibility. Fitness still selects on psnr_y (protocol
+    // stability — the migration law), but U/V quality is now MEASURED and
+    // reported so the chroma-blind spot (CfL / chroma_q invisibility) can be
+    // analyzed and the v0.6 perceptual/weighted metric can switch on data.
+    psnr_u: f32,
+    psnr_v: f32,
     enc_ms: f32,
     enc_mops: f32, // (dct+idct calls)*64 / 1e6
     dec_mops: f32, // idct calls*64 / 1e6
@@ -2000,16 +2006,25 @@ pub fn evalClip(
     }
 
     var acc: f32 = 0;
+    var acc_u: f32 = 0;
+    var acc_v: f32 = 0;
     for (0..clip.frames) |fi| {
         const s = clip.frameY(@intCast(fi));
         const d = decY[@as(usize, fi) * clip.ysz ..][0..clip.ysz];
         acc += yuv.psnrPlane(s, d);
+        acc_u += yuv.psnrPlane(clip.frameU(@intCast(fi)),
+                               decU[@as(usize, fi) * clip.csz ..][0..clip.csz]);
+        acc_v += yuv.psnrPlane(clip.frameV(@intCast(fi)),
+                               decV[@as(usize, fi) * clip.csz ..][0..clip.csz]);
     }
-    const mean_psnr = acc / @as(f32, @floatFromInt(clip.frames));
+    const nframes = @as(f32, @floatFromInt(clip.frames));
+    const mean_psnr = acc / nframes;
 
     return .{
         .bytes = bitstream.len,
         .psnr_y = mean_psnr,
+        .psnr_u = acc_u / nframes,
+        .psnr_v = acc_v / nframes,
         .enc_ms = @as(f32, @floatFromInt(enc_ns)) / 1e6,
         .enc_mops = @as(f32, @floatFromInt(ctx.dct_calls + ctx.idct_calls)) * 64.0 / 1e6,
         .dec_mops = @as(f32, @floatFromInt(ctx.idct_calls)) * 64.0 / 1e6,

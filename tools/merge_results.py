@@ -181,6 +181,45 @@ def main():
                           f"psnr={m['psnr']:.2f} bpp={m['bpp']:.4f} "
                           f"(this run's best, bot {cand['id']}, did not beat it)")
 
+    # ---- Pareto front archive (v0.5d) ----
+    # The scalar fitness crowns one bot; the archive honors every trade-off
+    # specialist (faster-at-equal-quality, smaller-at-equal-quality). NSGA-II
+    # spirit, merge-side only — no protocol change, no selection impact.
+    pareto_section = []
+    try:
+        sys.path.insert(0, os.path.join(repo, "tools"))
+        import pareto as _pareto
+        front, n_in = _pareto.update_archive(repo, champs)
+        pareto_section = _pareto.leaderboard_section(front)
+        report.append(f"pareto front: {len(front)} non-dominated champions "
+                      f"(archive +{n_in} this run)")
+    except Exception as e:
+        print(f"WARNING: pareto archive skipped: {e}")
+
+    # ---- BD-rate vs anchors (v0.5d) ----
+    # The standard codec comparison metric, computed from the champion's RD
+    # sweep (rd.json) against the anchor codec curves (baseline.json).
+    bd_section = []
+    try:
+        import bdrate as _bdrate
+        rd_p = os.path.join(args.in_dir, f"shard-{hof_champ['shard']}", "rd.json") if hof_champ else None
+        if rd_p and os.path.exists(rd_p) and base and isinstance(base.get("codecs"), dict):
+            with open(rd_p) as f:
+                rd = json.load(f)
+            bds = _bdrate.champion_vs_anchors(rd, base)
+            if bds:
+                bd_section = ["",
+                              f"## Champion BD-rate vs anchors (champion curve minus anchor curve; "
+                              f"negative = champion needs fewer bits, positive = more)", "",
+                              "| codec | BD-rate |", "|---|---|"]
+                for cname, bd in bds:
+                    bd_section.append(f"| {cname} | {bd:+.2f}% |")
+                bd_section.append("")
+                report.append("champion BD-rate vs anchors: "
+                              + ", ".join(f"{c} {b:+.1f}%" for c, b in bds))
+    except Exception as e:
+        print(f"WARNING: BD-rate skipped: {e}")
+
     # ---- LEADERBOARD.md ----
     # (fits() and cfg from the champion block above; one fitness everywhere.)
     lb = ["# Leaderboard", "",
@@ -218,6 +257,14 @@ def main():
                       f"quality gap {base['target_psnr'] - m['psnr']:.1f} dB, "
                       f"bits gap {m['bpp']:.4f} vs 0.161 (x264 qp40 point).")
             lb.append("")
+        if pareto_section:
+            lb += pareto_section
+        if bd_section:
+            lb += bd_section
+        lb += ["## Gene credit (which genes selection rewards)", "",
+               "See [GENE_CREDIT.md](GENE_CREDIT.md) — mined from every recorded",
+               "generation's selection signals plus the champion lineage drift."]
+        lb.append("")
     with open(os.path.join(repo, "LEADERBOARD.md"), "w") as f:
         f.write("\n".join(lb))
 
@@ -237,6 +284,22 @@ def main():
                     sigs = ", ".join(f"{k} {'+' if v > 0 else ''}{v}" for k, v in top)
                     f.write(f"- gen {l.get('gen')} shard {l.get('shard')} "
                             f"(fit {l.get('best_fit')}): {sigs}\n")
+
+    # ---- gene credit report (v0.5d) ----
+    # Which genes does selection actually reward? Mined from LESSONS.md + the
+    # champion lineage. Cheap, honest, and the direct answer to "what is the
+    # evolution using?".
+    try:
+        import subprocess as _sp2
+        r = _sp2.run([sys.executable, os.path.join(repo, "tools", "gene_credit.py"),
+                      "--repo", repo, "--out", "GENE_CREDIT.md"],
+                     capture_output=True, text=True)
+        if r.returncode == 0:
+            print(f"gene credit: {r.stdout.strip()}")
+        else:
+            print(f"WARNING: gene_credit failed rc={r.returncode}: {r.stderr.strip()[-200:]}")
+    except Exception as e:
+        print(f"WARNING: gene_credit skipped: {e}")
 
     # ---- champion warm-start reseeding (v0.5b ops) ----
     # Every run used to re-walk from the same static v3-era seed file; shards

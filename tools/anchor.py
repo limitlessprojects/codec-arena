@@ -53,11 +53,17 @@ def ffmpeg_args(codec, rc):
 
 
 def psnr_via_arena(zig, a, b, w, h, frames):
+    """v0.5d: returns (psnr_y, psnr_u, psnr_v). The arena psnr tool prints all
+    three; older binaries print only Y — handled gracefully."""
     r = subprocess.run([zig, "psnr", a, b, str(w), str(h), str(frames)],
                        capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(r.stderr)
-    return float(r.stdout.strip())
+    toks = r.stdout.split()
+    y = float(toks[0])
+    u = float(toks[1]) if len(toks) > 1 else None
+    v = float(toks[2]) if len(toks) > 2 else None
+    return y, u, v
 
 
 def main():
@@ -84,6 +90,9 @@ def main():
             tot_bits = 0
             tot_px = 0
             acc_psnr = 0.0
+            acc_u = 0.0
+            acc_v = 0.0
+            n_planes = 0
             ok = True
             for name, w, h, frames, fps in clips:
                 src = os.path.join(args.corpus, f"{name}.yuv")
@@ -107,14 +116,23 @@ def main():
                     if r2.returncode != 0:
                         ok = False
                         break
-                    acc_psnr += psnr_via_arena(args.zig, src, dec, w, h, frames)
+                    y, u, v = psnr_via_arena(args.zig, src, dec, w, h, frames)
+                    acc_psnr += y
+                    if u is not None:
+                        acc_u += u
+                        acc_v += v
+                        n_planes += 1
                     tot_px += frames * w * h * 3 // 2
             if ok and tot_px:
-                points.append({
+                pt = {
                     "rc": " ".join(rc),
                     "psnr": round(acc_psnr / len(clips), 2),
                     "bpp": round(tot_bits / tot_px, 4),
-                })
+                }
+                if n_planes:
+                    pt["psnr_u"] = round(acc_u / n_planes, 2)
+                    pt["psnr_v"] = round(acc_v / n_planes, 2)
+                points.append(pt)
         results["codecs"][label] = points
         print(label, points)
 

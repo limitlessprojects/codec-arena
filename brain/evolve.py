@@ -110,12 +110,18 @@ def run_eval(zig_bin, corpus, pop, out_csv, fast=True):
     with open(out_csv) as f:
         for line in f:
             t = line.strip().split(",")
-            if len(t) != 5:
+            if len(t) < 5:
                 continue
-            res[int(t[0])] = {
+            r = {
                 "psnr": float(t[1]), "bpp": float(t[2]),
                 "enc_ms10": float(t[3]), "dec_mops": float(t[4]),
             }
+            # v0.5d: optional chroma columns (psnr_u, psnr_v) — reported only;
+            # fitness still selects on psnr_y until the v0.6 metric switch.
+            if len(t) >= 7:
+                r["psnr_u"] = float(t[5])
+                r["psnr_v"] = float(t[6])
+            res[int(t[0])] = r
     os.remove(out_csv + ".pop")
     return res
 
@@ -239,7 +245,11 @@ def main():
         src = population[rng.randrange(len(population))]
         child = dict(src)
         child["g"] = mutate(src, 0.2, rng)
-        child["id"] = args.shard * 10_000_000 + len(population)
+        # v0.5d bugfix: padding ids used to share the shard*1e7 + n space with
+        # generation-0 bred/promoted ids -> duplicate ids inside one eval call
+        # (res dict overwritten, two bots scored with one result). Padding now
+        # lives in a reserved sub-range that the gen loop never reaches.
+        child["id"] = args.shard * 10_000_000 + 8_000_000 + len(population)
         child["gen"] = 0
         population.append(child)
     population = population[:args.pop]
