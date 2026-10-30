@@ -11,9 +11,9 @@
 // map of its gene with gain bounded to ±0.25, neutral at gene = 0.5.
 // A 0.01 mutation changes output by at most ~0.5% of the modulated quantity.
 
-pub const NG: usize = 22; // effectors (legacy 16 preserved; v0.4 +2, v0.5 +3, v0.5b +1)
+pub const NG: usize = 23; // effectors (legacy 16 preserved; v0.4 +2, v0.5 +3, v0.5b +1, v0.8 +1)
 pub const NR: usize = 6; // regulators
-pub const NTOT: usize = NG + NR; // 28
+pub const NTOT: usize = NG + NR; // 29
 
 // v0.4 structural genes (learned from the best of the best — x264's two
 // structural pillars). Migration invariant: gene 0.0 == EXACT legacy
@@ -59,6 +59,19 @@ pub fn qpelGene(g: *const Genome) f32 {
 pub fn qpelOn(g: *const Genome) bool {
     return g.g[21] > 0.5;
 }
+// v0.8 structural gene (learned from the H.264/AV1 superblock layer: partition
+// the 8x8 block grid into 16x16 superblocks that can code as one). Same
+// migration invariant: gene 0.0 == exact v0.5b behavior, byte-for-byte.
+/// g[22]: 16x16 superblock layer — unified intra (DC-pred 16x16 TX), unified
+///   inter (one MV + 16x16 TX residual) and skip16 (one MV, 4 blocks copied).
+///   <=0.5 = off = legacy 8x8-only syntax; >0.5 = on, the value also scales
+///   the encoder's rate-distortion bias toward/away from the unified mode.
+pub fn sb16Gene(g: *const Genome) f32 {
+    return clamp01(g.g[22]);
+}
+pub fn sb16On(g: *const Genome) bool {
+    return g.g[22] > 0.5;
+}
 
 const std = @import("std");
 
@@ -79,6 +92,7 @@ pub const GeneNames = [_][]const u8{
     "halfpel",    "refresh", "adaptq",   "chroma_q",
     "intra_pred", "deblock",
     "entropy",    "cfl",     "cdef",     "qpel",
+    "sb16",
 };
 pub const RegNames = [_][]const u8{
     "mv_dz", // deadzone scales with motion magnitude   (encoder-side)
@@ -97,17 +111,18 @@ pub const NEW_GENE_LEGACY: f32 = 0.0; // migration default: exact legacy behavio
 ///   v3: id gen pa pb tribe g0..g17 r0..r5           (29 tokens)
 ///   v4: id gen pa pb tribe g0..g20 r0..r5           (32 tokens)
 ///   v5: id gen pa pb tribe g0..g21 r0..r5           (33 tokens; v0.5b qpel)
-/// v1/v2/v3/v4 lines migrate with the newer genes at 0.0 = exact legacy behavior.
+///   v6: id gen pa pb tribe g0..g22 r0..r5           (34 tokens; v0.8 sb16)
+/// v1..v5 lines migrate with the newer genes at 0.0 = exact legacy behavior.
 pub fn parseLine(line: []const u8) !?Genome {
     var it = std.mem.tokenizeAny(u8, line, " \t\r");
-    var tok: [33][]const u8 = undefined;
+    var tok: [34][]const u8 = undefined;
     var n: usize = 0;
     while (it.next()) |t| {
-        if (n >= 33) return error.BadLine;
+        if (n >= 34) return error.BadLine;
         tok[n] = t;
         n += 1;
     }
-    if (n != 21 and n != 27 and n != 29 and n != 32 and n != 33) return null;
+    if (n != 21 and n != 27 and n != 29 and n != 32 and n != 33 and n != 34) return null;
     if (tok[0].len > 0 and tok[0][0] == '#') return null;
     var gm = Genome{
         .id = try std.fmt.parseInt(u64, tok[0], 10),
@@ -141,6 +156,11 @@ pub fn parseLine(line: []const u8) !?Genome {
     } else {
         gm.g[21] = NEW_GENE_LEGACY;
     }
+    if (n == 34) {
+        gm.g[22] = try std.fmt.parseFloat(f32, tok[27]); // v0.8: sb16
+    } else {
+        gm.g[22] = NEW_GENE_LEGACY;
+    }
     if (n == 27) {
         for (0..NR) |i| {
             gm.reg[i] = try std.fmt.parseFloat(f32, tok[21 + i]);
@@ -157,13 +177,17 @@ pub fn parseLine(line: []const u8) !?Genome {
         for (0..NR) |i| {
             gm.reg[i] = try std.fmt.parseFloat(f32, tok[27 + i]);
         }
+    } else if (n == 34) {
+        for (0..NR) |i| {
+            gm.reg[i] = try std.fmt.parseFloat(f32, tok[28 + i]);
+        }
     } else {
         for (0..NR) |i| gm.reg[i] = 0.5; // v1: neutral regulators
     }
     return gm;
 }
 
-/// Emit a v5 pop-file line (33 tokens).
+/// Emit a v6 pop-file line (34 tokens).
 pub fn formatLine(g: *const Genome, buf: []u8) ![]const u8 {
     var fbs = std.io.fixedBufferStream(buf);
     const w = fbs.writer();

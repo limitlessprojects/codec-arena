@@ -47,24 +47,25 @@ import subprocess
 import sys
 import time
 
-NG_EFF = 22          # effectors (legacy 16; v0.4 adds intra_pred/deblock; v0.5 entropy/cfl/cdef; v0.5b qpel)
+NG_EFF = 23          # effectors (legacy 16; v0.4 adds intra_pred/deblock; v0.5 entropy/cfl/cdef; v0.5b qpel; v0.8 sb16)
 NR_REG = 6           # regulator genes (GRN v1)
-NG = NG_EFF + NR_REG # 28 total; screens model 28 linear + 16^2 quad over legacy effectors
+NG = NG_EFF + NR_REG # 29 total; screens model 29 linear + 16^2 quad over legacy effectors
 GENE_NAMES = [
-    # effectors (1..22) — g[1] and g[10] repurposed in v0.3 (were placebo);
+    # effectors (1..23) — g[1] and g[10] repurposed in v0.3 (were placebo);
     # g[17] intra_pred and g[18] deblock added in v0.4 (x264's pillars);
     # g[19] entropy, g[20] cfl and g[21] cdef added in v0.5 (AV1's lineup);
-    # g[22] qpel added in v0.5b (AV1 4-tap interpolation lattice)
+    # g[22] qpel added in v0.5b (AV1 4-tap interpolation lattice);
+    # g[23] sb16 added in v0.8 (H.264/AV1 16x16 superblock layer)
     "keyint", "dz_dc", "search", "baseq", "q_low", "q_mid", "q_high",
     "deadzone", "skip", "p_qmul", "intra_b0", "dither", "halfpel",
     "refresh", "adaptq", "chroma_q", "intra_pred", "deblock",
-    "entropy", "cfl", "cdef", "qpel",
-    # regulators (23..28) — decoder-derivable context, bounded gains
+    "entropy", "cfl", "cdef", "qpel", "sb16",
+    # regulators (24..29) — decoder-derivable context, bounded gains
     "mv_dz", "mv_q", "gop_q", "row_q", "skip_mv", "intra_gop",
 ]
 REG_DEFAULT = 0.5    # neutral regulator: gain 0, phenotype identical to v0.1
 NEW_GENE_DEFAULT = 0.0  # migration default: gene 0.0 == exact legacy behavior
-N_NEW = 6            # v0.4 (2) + v0.5 (3) + v0.5b (1) structural genes riding at 0.0 on old lines
+N_NEW = 7            # v0.4 (2) + v0.5 (3) + v0.5b (1) + v0.8 sb16 (1) structural genes riding at 0.0 on old lines
 
 
 def load_pop(path):
@@ -82,11 +83,14 @@ def load_pop(path):
                 # v2 line: eff16 + reg6 -> flat g = eff16 + 6 new (0) + reg6
                 t = t[: 5 + 16] + [str(NEW_GENE_DEFAULT)] * N_NEW + t[5 + 16 :]
             elif len(t) == 5 + 24:
-                # v3 line: eff16 + v0.4 pair + reg6 -> insert 3 v0.5 genes + qpel (0)
-                t = t[: 5 + 18] + [str(NEW_GENE_DEFAULT)] * 4 + t[5 + 18 :]
+                # v3 line: eff16 + v0.4 pair + reg6 -> insert 3 v0.5 genes + qpel + sb16 (0)
+                t = t[: 5 + 18] + [str(NEW_GENE_DEFAULT)] * 5 + t[5 + 18 :]
             elif len(t) == 5 + 27:
-                # v4 line: eff21 + reg6 -> insert qpel (0) before the regs
-                t = t[: 5 + 21] + [str(NEW_GENE_DEFAULT)] + t[5 + 21 :]
+                # v4 line: eff21 + reg6 -> insert qpel + sb16 (0) before the regs
+                t = t[: 5 + 21] + [str(NEW_GENE_DEFAULT)] * 2 + t[5 + 21 :]
+            elif len(t) == 5 + 28:
+                # v5 line: eff22 + reg6 -> insert sb16 (0) before the regs
+                t = t[: 5 + 22] + [str(NEW_GENE_DEFAULT)] + t[5 + 22 :]
             if len(t) != 5 + NG:
                 continue
             pop.append({
@@ -205,9 +209,9 @@ def fitness(g, r, cfg):
 # ---- surrogate refit (per-shard adaptation; numpy optional) ----
 
 def features(genes):
-    """28 flat genes -> (165,): 1 | 28 linear | 136 quadratic over the 16
-    LEGACY effectors (the v0.4/v0.5/v0.5b genes ride linear-only until a refit
-    learns them; the compact v5 model layout mirrors screen.zig exactly)."""
+    """29 flat genes -> (166,): 1 | 29 linear | 136 quadratic over the 16
+    LEGACY effectors (the v0.4/v0.5/v0.5b/v0.8 genes ride linear-only until a
+    refit learns them; the compact v6 model layout mirrors screen.zig exactly)."""
     v = [1.0]
     v.extend(genes)
     for i in range(16):
@@ -224,14 +228,16 @@ def load_weights(path):
     # v1/v2/v3/v4 -> v5 migration: insert neutral zeros for the newer genes'
     # linear slots (the quad block over the legacy 16 is untouched; regs are
     # neutral at weight 0). Keeps per-shard refits alive across upgrades.
-    if n == 153:   # v1: 1 + 16 + 136 -> +12 (6 new genes + 6 regs)
-        w = w[:17] + [0.0] * 12 + w[17:]
-    elif n == 159: # v2: 1 + 22 + 136 -> +6 (6 new genes)
-        w = w[:17] + [0.0] * 6 + w[17:]
-    elif n == 161: # v3: 1 + 24 + 136 -> +4 (3 v0.5 + qpel)
-        w = w[:19] + [0.0] * 4 + w[19:]
-    elif n == 164: # v4: 1 + 27 + 136 -> +1 (qpel, before the reg slots)
-        w = w[:22] + [0.0] + w[22:]
+    if n == 153:   # v1: 1 + 16 + 136 -> +13 (6 new genes + sb16 + 6 regs)
+        w = w[:17] + [0.0] * 13 + w[17:]
+    elif n == 159: # v2: 1 + 22 + 136 -> +7 (6 new genes + sb16)
+        w = w[:17] + [0.0] * 7 + w[17:]
+    elif n == 161: # v3: 1 + 24 + 136 -> +5 (3 v0.5 + qpel + sb16)
+        w = w[:19] + [0.0] * 5 + w[19:]
+    elif n == 164: # v4: 1 + 27 + 136 -> +2 (qpel + sb16, before the reg slots)
+        w = w[:22] + [0.0] * 2 + w[22:]
+    elif n == 165: # v5: 1 + 28 + 136 -> +1 (sb16, before the reg slots)
+        w = w[:29] + [0.0] + w[29:]
     return w
 
 
@@ -299,7 +305,7 @@ def main():
                     help="screen survivors promoted per gen (default pop/8*6)")
     ap.add_argument("--threads", type=int, default=4, help="screen kernel threads")
     ap.add_argument("--model", default="state/surrogate.txt",
-                    help="surrogate weights (153/159/161 legacy, 164 v4, or 165 v5 compact floats)")
+                    help="surrogate weights (153/159/161 legacy, 164 v4, 165 v5, or 166 v6 compact floats)")
     ap.add_argument("--rd-sweep", action="store_true", default=True)
     ap.add_argument("--probe", action="store_true", default=True,
                     help="canalization probe: epsilon-mutant sweep of the champion")

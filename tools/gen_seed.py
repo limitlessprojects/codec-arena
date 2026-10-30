@@ -33,6 +33,9 @@ TRIBES = [
 
 # v0.5 additions ride at 0.0 = exact legacy behavior on archetype lines
 V05_TAIL = [0.0, 0.0, 0.0, 0.0]  # entropy, cfl, cdef, qpel
+# v0.8 sb16: archetype personalities — every tribe carries the superblock
+# layer at a different RD bias so the very first generation explores it
+SB16_ARCH = [0.9, 0.6, 0.0, 0.75, 0.6, 0.9, 0.75, 0.6]  # per TRIBES index
 
 # champion-lineage tribes: (tribe_tag, jitter sigma) — tight to loose
 CHAMP_TRIBES = [
@@ -49,15 +52,21 @@ def champion_lines(champ_path, per_tribe, bid0):
     g = [float(x) for x in champ["g"]]
     if len(g) == 27:
         g = g[:21] + [0.0] + g[21:]  # v4 -> v5: qpel at legacy 0.0
-    assert len(g) == 28, f"champion genome length {len(g)} unexpected"
-    regs = g[22:28]
-    eff = g[0:22]
+    if len(g) == 28:
+        g = g[:22] + [0.0] + g[22:]  # v5 -> v6: sb16 at legacy 0.0 (29 flat)
+    assert len(g) == 29, f"champion genome length {len(g)} unexpected"
+    regs = g[23:29]
+    eff = g[0:23]
+    # sb16 lineage exploration: champion tribes alternate layer-on/off so the
+    # RD data decides — on (0.9/0.6/0.75) vs legacy 0.0
+    SB16_TRIBE = [0.9, 0.0, 0.6, 0.0, 0.75, 0.0]
     rng = random.Random(0x4A2E1A ^ int(champ.get("id", 0) or 0))
     lines = []
     bid = bid0
-    for tag, sigma in CHAMP_TRIBES:
+    for ti, (tag, sigma) in enumerate(CHAMP_TRIBES):
         for _ in range(per_tribe):
             e = [min(1.0, max(0.0, x + rng.gauss(0, sigma))) for x in eff]
+            e[22] = min(1.0, max(0.0, SB16_TRIBE[ti] + rng.gauss(0, 0.05)))
             r = [min(1.0, max(0.0, x + rng.gauss(0, sigma * 0.5))) for x in regs]
             lines.append(f"{bid} 0 0 0 {tag} " + " ".join(f"{x:.4f}" for x in e)
                          + " " + " ".join(f"{x:.4f}" for x in r))
@@ -104,6 +113,7 @@ def main():
         for _ in range(arch_per):
             genes = [min(1.0, max(0.0, g + rng.gauss(0, 0.06))) for g in base]
             genes = genes + V05_TAIL  # entropy/cfl/cdef/qpel at legacy 0.0
+            genes = genes + [max(0.0, min(1.0, SB16_ARCH[ti] + rng.gauss(0, 0.05)))]
             regs = [min(1.0, max(0.0, r + rng.gauss(0, 0.05))) for r in REGS[ti]]
             lines.append(f"{bid} 0 0 0 {ti} " + " ".join(f"{g:.4f}" for g in genes)
                          + " " + " ".join(f"{r:.4f}" for r in regs))
@@ -112,6 +122,7 @@ def main():
         for _ in range(exp_per):
             genes = [round(rng.random(), 4) for _ in range(18)]
             genes = genes + V05_TAIL
+            genes = genes + [round(rng.random(), 4)]  # sb16: explorers span [0,1]
             lines.append(f"{bid} 0 0 0 {ti} " + " ".join(f"{g:.4f}" for g in genes)
                          + " " + " ".join("0.5000" for _ in range(6)))
             bid += 1

@@ -22,13 +22,13 @@ GENE_NAMES = [
     "keyint", "dz_dc", "search", "baseq", "q_low", "q_mid", "q_high",
     "deadzone", "skip", "p_qmul", "intra_b0", "dither", "halfpel",
     "refresh", "adaptq", "chroma_q", "intra_pred", "deblock",
-    "entropy", "cfl", "cdef", "qpel",
+    "entropy", "cfl", "cdef", "qpel", "sb16",
     "mv_dz", "mv_q", "gop_q", "row_q", "skip_mv", "intra_gop",
 ]
 # where each gene sits in the champion's flat g[] vector
 IDX = {n: i for i, n in enumerate(GENE_NAMES)}
 # seed defaults for the 6 v0.4+ structural genes (0.0 = legacy behavior)
-STRUCTURAL = {"intra_pred", "deblock", "entropy", "cfl", "cdef", "qpel"}
+STRUCTURAL = {"intra_pred", "deblock", "entropy", "cfl", "cdef", "qpel", "sb16"}
 
 
 def parse_lessons(path):

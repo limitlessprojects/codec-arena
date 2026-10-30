@@ -40,6 +40,7 @@ pub const ClipStats = struct {
 // ---------------------------------------------------------------- DCT tables
 
 var dct_tab: [64]f32 = undefined; // t[u*8 + x] = c(u)/2 * cos((2x+1)u*pi/16)
+var dct16_tab: [256]f32 = undefined; // v0.8: t[u*16 + x] = c(u)/2 * cos((2x+1)u*pi/32)
 var dct_ready = false;
 
 fn initDct() void {
@@ -50,6 +51,13 @@ fn initDct() void {
         for (0..8) |x| {
             const ang = pi * (2.0 * @as(f32, @floatFromInt(x)) + 1.0) * @as(f32, @floatFromInt(u)) / 16.0;
             dct_tab[u * 8 + x] = 0.5 * cu * @cos(ang);
+        }
+    }
+    for (0..16) |u| {
+        const cu: f32 = if (u == 0) @sqrt(0.5) else 1.0;
+        for (0..16) |x| {
+            const ang = pi * (2.0 * @as(f32, @floatFromInt(x)) + 1.0) * @as(f32, @floatFromInt(u)) / 32.0;
+            dct16_tab[u * 16 + x] = 0.5 * cu * @cos(ang);
         }
     }
     dct_ready = true;
@@ -69,6 +77,42 @@ const ZZ = [64]u8{
 
 fn zzBand(k: usize) usize {
     return if (k < 8) 0 else if (k < 16) 1 else 2;
+}
+
+// v0.8: 16x16 zigzag (same diagonal snake, scaled) + band map. Bands keep
+// the legacy 8x8 proportions (12.5% / 12.5% / 75%) so the evolved bandScale
+// genes transfer their meaning to the big transform.
+const ZZ16: [256]u16 = blk: {
+    @setEvalBranchQuota(10000);
+    var t: [256]u16 = undefined;
+    var k: usize = 0;
+    var s: i32 = 0;
+    while (s < 31) : (s += 1) {
+        if (@mod(s, 2) == 0) {
+            var r: i32 = if (s < 16) s else 15;
+            var c: i32 = s - r;
+            while (r >= 0 and c < 16) {
+                t[k] = @intCast(r * 16 + c);
+                k += 1;
+                r -= 1;
+                c += 1;
+            }
+        } else {
+            var c: i32 = if (s < 16) s else 15;
+            var r: i32 = s - c;
+            while (c >= 0 and r < 16) {
+                t[k] = @intCast(r * 16 + c);
+                k += 1;
+                c -= 1;
+                r += 1;
+            }
+        }
+    }
+    break :blk t;
+};
+
+fn zzBand16(k: usize) usize {
+    return if (k < 32) 0 else if (k < 64) 1 else 2;
 }
 
 // --------------------------------------------------------- bit writer/reader
@@ -230,6 +274,7 @@ const CX_LV_U0: usize = 30; // level abs-1 unary (>0,>1,>2)
 const CX_LV_ESC: usize = 33; // level big-escape flag
 const CX_LV_B0: usize = 34; // level raw bits (12, +16 on escape)
 const CX_LV_SIGN: usize = 46;
+const CX_MARK_C: usize = 62; // v0.8 sb16 wide-marker third bit (gene-gated)
 
 const ACEnc = struct {
     buf: []u8,
@@ -359,6 +404,25 @@ fn decMarker(ac: *ACDec, ps: *Probs) !u8 {
     if (try ac.decodeBit(ps, CX_MARK_A) == 1) return 1;
     return if (try ac.decodeBit(ps, CX_MARK_B) == 1) 2 else 0;
 }
+// v0.8 wide markers: when the sb16 gene is on, a non-skip marker carries one
+// extra context bit — 1 = superblock-unified follows (value 3), 0 = the
+// legacy {0,2} fork. Gene off => the tree is bit-exact legacy (the extra bit
+// is never read nor adapted), so pre-v0.8 genomes decode byte-for-byte.
+fn encMarkerWide(ac: *ACEnc, ps: *Probs, m: u8) void {
+    if (m == 1) {
+        ac.encodeBit(ps, CX_MARK_A, 1);
+        return;
+    }
+    ac.encodeBit(ps, CX_MARK_A, 0);
+    ac.encodeBit(ps, CX_MARK_B, if (m == 2) 1 else 0);
+    ac.encodeBit(ps, CX_MARK_C, if (m == 3) 1 else 0);
+}
+fn decMarkerWide(ac: *ACDec, ps: *Probs) !u8 {
+    if (try ac.decodeBit(ps, CX_MARK_A) == 1) return 1;
+    const b = try ac.decodeBit(ps, CX_MARK_B);
+    if (try ac.decodeBit(ps, CX_MARK_C) == 1) return 3;
+    return if (b == 1) 2 else 0;
+}
 
 fn encMV(ac: *ACEnc, ps: *Probs, d: i32) void {
     ac.encodeBit(ps, CX_MV_SIGN, if (d < 0) 1 else 0);
@@ -439,6 +503,24 @@ fn acDecLevels(ac: *ACDec, ps: *Probs, g: *const gen.Genome, qp: f32, scale: f32
     }
 }
 
+/// v0.8: big-TX twin of acDecLevels (256 coefs, ZZ16 scan, levelQ16 dequant).
+fn acDecLevels16(ac: *ACDec, ps: *Probs, g: *const gen.Genome, qp: f32, scale: f32, rc: gen.RegCtx, coef: *[256]f32) !void {
+    for (coef) |*c| c.* = 0;
+    var npairs = try decUnary(ac, ps, CX_NP_U0, 4);
+    if (npairs > 3) npairs = 4 + try decUBits(ac, ps, CX_NP_B0, 6);
+    var k: u32 = 0;
+    var i: u32 = 0;
+    while (i < npairs) : (i += 1) {
+        var run = try decUnary(ac, ps, CX_RN_U0, 4);
+        if (run > 3) run = 4 + try decUBits(ac, ps, CX_RN_B0, 6);
+        k += run;
+        if (k >= 256) return error.Corrupt;
+        const lvl = try acDecLevel(ac, ps);
+        coef[ZZ16[@intCast(k)]] = @as(f32, @floatFromInt(lvl)) * levelQ16(g, qp, scale, @intCast(k), rc);
+        k += 1;
+    }
+}
+
 /// Comptime-specialized block-stream writer: one source, two bitstreams.
 /// Legacy=false is the byte-varint path (byte-exact v0.4); Legacy=true is
 /// the adaptive arithmetic coder (v0.5 entropy gene).
@@ -471,6 +553,18 @@ fn BlockW(comptime ac_on: bool) type {
         fn levels(self: *@This(), lv: []const i32, last: usize) void {
             if (ac_on) acEncLevels(&self.ac, &self.ps, lv, last) else packPairs(&self.bw, lv, last);
         }
+        /// v0.8 sb16 wide marker (values 0..3; third bit only when wide).
+        fn markerSB(self: *@This(), m: u8, wide: bool) void {
+            if (ac_on) {
+                if (wide) encMarkerWide(&self.ac, &self.ps, m) else encMarker(&self.ac, &self.ps, m);
+            } else {
+                self.bw.putU8(m);
+            }
+        }
+        /// v0.8: big-TX levels — same pair coding, 256 zigzag slots.
+        fn levels16(self: *@This(), lv: []const i32, last: usize) void {
+            if (ac_on) acEncLevels(&self.ac, &self.ps, lv, last) else packPairs(&self.bw, lv, last);
+        }
         fn written(self: *@This()) usize {
             return if (ac_on) self.ac.n else self.bw.n;
         }
@@ -496,6 +590,14 @@ fn BlockR(comptime ac_on: bool) type {
         }
         fn marker(self: *@This()) !u8 {
             if (ac_on) return decMarker(&self.ac, &self.ps);
+            return try self.br.getU8();
+        }
+        /// v0.8 sb16 wide marker read (third bit only when wide).
+        fn markerSB(self: *@This(), wide: bool) !u8 {
+            if (ac_on) {
+                if (wide) return decMarkerWide(&self.ac, &self.ps);
+                return decMarker(&self.ac, &self.ps);
+            }
             return try self.br.getU8();
         }
         fn mvPair(self: *@This()) ![2]i32 {
@@ -527,6 +629,26 @@ fn BlockR(comptime ac_on: bool) type {
                 if (k >= 64) return error.Corrupt;
                 const lf: f32 = @floatFromInt(lvl);
                 coef[ZZ[@intCast(k)]] = lf * levelQ(g, qp, scale, @intCast(k), rc);
+                k += 1;
+            }
+        }
+        /// v0.8: big-TX levels read (256 zigzag slots, ZZ16 + levelQ16).
+        fn levels16(self: *@This(), g: *const gen.Genome, qp: f32, scale: f32, rc: gen.RegCtx, coef: *[256]f32) !void {
+            if (ac_on) {
+                try acDecLevels16(&self.ac, &self.ps, g, qp, scale, rc, coef);
+                return;
+            }
+            for (coef) |*c| c.* = 0;
+            const npairs = try self.br.getUvarint();
+            var k: u64 = 0;
+            var i: u64 = 0;
+            while (i < npairs) : (i += 1) {
+                const run = try self.br.getUvarint();
+                const lvl = try self.br.getSvarint();
+                k += run;
+                if (k >= 256) return error.Corrupt;
+                const lf: f32 = @floatFromInt(lvl);
+                coef[ZZ16[@intCast(k)]] = lf * levelQ16(g, qp, scale, @intCast(k), rc);
                 k += 1;
             }
         }
@@ -576,6 +698,48 @@ fn idct8(coef: *const [64]f32, dst: []u8, stride: usize, idct_calls: *u64) void 
     idct_calls.* += 1;
 }
 
+// ---- v0.8: 16x16 transform (the superblock's big TX; direct separable
+// matrix product, same orthonormal DCT-II convention as dct8) ----
+fn dct16(src: []const u8, out: *[256]f32) void {
+    var tmp: [256]f32 = undefined;
+    for (0..16) |r| {
+        for (0..16) |u| {
+            var s: f32 = 0;
+            for (0..16) |x| {
+                const px: f32 = @as(f32, @floatFromInt(src[r * 16 + x])) - 128.0;
+                s += px * dct16_tab[u * 16 + x];
+            }
+            tmp[r * 16 + u] = s;
+        }
+    }
+    for (0..16) |u| {
+        for (0..16) |v| {
+            var s: f32 = 0;
+            for (0..16) |r| s += tmp[r * 16 + u] * dct16_tab[v * 16 + r];
+            out[v * 16 + u] = s;
+        }
+    }
+}
+fn idct16(coef: *const [256]f32, dst: []u8, stride: usize, idct_calls: *u64) void {
+    var tmp: [256]f32 = undefined;
+    for (0..16) |v| {
+        for (0..16) |x| {
+            var s: f32 = 0;
+            for (0..16) |u| s += coef[v * 16 + u] * dct16_tab[u * 16 + x];
+            tmp[x * 16 + v] = s;
+        }
+    }
+    for (0..16) |r| {
+        for (0..16) |c| {
+            var s: f32 = 0;
+            for (0..16) |v| s += tmp[r * 16 + v] * dct16_tab[v * 16 + c];
+            const px: i32 = @intFromFloat(@round(s + 128.0));
+            dst[r * stride + c] = @intCast(std.math.clamp(px, 0, 255));
+        }
+    }
+    idct_calls.* += 1;
+}
+
 // v0.6a: uniform quantizer override for RD probing (--qscale). Applied in
 // bandQ — THE single funnel every quant step passes through on BOTH encoder
 // and decoder — so the two sides can never disagree by construction. 1.0 =
@@ -605,6 +769,15 @@ fn levelQ(g: *const gen.Genome, qp: f32, base_scale: f32, k: usize, rc: gen.RegC
     const bs = gen.bandScale(g, zzBand(k));
     var s = base_scale * gen.regQMod(g, rc) * bs;
     if (rc.intra and zzBand(k) == 0) s *= gen.intraB0Mul(g);
+    return bandQ(qp, s);
+}
+
+/// v0.8: levelQ twin for the 16x16 transform — same gene funnel, band map
+/// from zzBand16. Both sides call this, so big-TX dequant never desyncs.
+fn levelQ16(g: *const gen.Genome, qp: f32, base_scale: f32, k: usize, rc: gen.RegCtx) f32 {
+    const bs = gen.bandScale(g, zzBand16(k));
+    var s = base_scale * gen.regQMod(g, rc) * bs;
+    if (rc.intra and zzBand16(k) == 0) s *= gen.intraB0Mul(g);
     return bandQ(qp, s);
 }
 
@@ -908,6 +1081,29 @@ fn dcPred8(recon: []const u8, pw: usize, sx: usize, sy: usize) u8 {
         var s: i32 = 0;
         for (0..8) |i| s += recon[(sy + i) * pw + sx - 1];
         dc = @divTrunc(s + 4, 8);
+    }
+    return @intCast(std.math.clamp(dc, 0, 255));
+}
+
+/// v0.8: DC prediction of a 16x16 superblock from its recon neighbors — the
+/// big-TX twin of dcPred8, shared by encoder trial and decoder recon.
+fn dcPred16(recon: []const u8, pw: usize, sx: usize, sy: usize) u8 {
+    const have_top = sy > 0;
+    const have_left = sx > 0;
+    var dc: i32 = 128 * 32;
+    if (have_top and have_left) {
+        var s: i32 = 0;
+        for (0..16) |i| s += recon[(sy - 1) * pw + sx + i];
+        for (0..16) |i| s += recon[(sy + i) * pw + sx - 1];
+        dc = @divTrunc(s + 16, 32);
+    } else if (have_top) {
+        var s: i32 = 0;
+        for (0..16) |i| s += recon[(sy - 1) * pw + sx + i];
+        dc = @divTrunc(s + 8, 16);
+    } else if (have_left) {
+        var s: i32 = 0;
+        for (0..16) |i| s += recon[(sy + i) * pw + sx - 1];
+        dc = @divTrunc(s + 8, 16);
     }
     return @intCast(std.math.clamp(dc, 0, 255));
 }
@@ -1285,6 +1481,25 @@ fn dequantLevels(ctx: *Ctx, lv: *const [64]i32, qp: f32, scale: f32, rc: gen.Reg
     }
 }
 
+/// v0.8: big-TX quantize — dct16 + deadzone over the 256-coef zigzag.
+fn quantizeBlock16(ctx: *Ctx, src: []const u8, qp: f32, scale: f32, rc: gen.RegCtx, lv: *[256]i32) void {
+    var coef: [256]f32 = undefined;
+    dct16(src, &coef);
+    ctx.dct_calls += 1;
+    const dz0 = gen.regDeadzone(ctx.g, rc, gen.deadzone(ctx.g));
+    const dith = gen.dither(ctx.g);
+    for (0..256) |k| {
+        const dz = if (k == 0) dz0 * gen.dzDcMul(ctx.g) else dz0;
+        lv[k] = quantLevel(coef[ZZ16[k]], levelQ16(ctx.g, qp, scale, k, rc), dz, dith);
+    }
+}
+fn dequantLevels16(ctx: *Ctx, lv: *const [256]i32, qp: f32, scale: f32, rc: gen.RegCtx, out: *[256]f32) void {
+    for (0..256) |k| {
+        const lf: f32 = @floatFromInt(lv[k]);
+        out[ZZ16[k]] = lf * levelQ16(ctx.g, qp, scale, k, rc);
+    }
+}
+
 // --------------------------------------------------------------- encode frame
 
 fn encodeFrame(ctx: *Ctx, fi: u32) !void {
@@ -1423,6 +1638,235 @@ fn encodePlaneT(
     var w = BlockW(ac_on).init(ctx.scratch);
     if (modes.len > 1 and (nbx * nby * @as(usize, mwidth) + 7) / 8 > mmap.len) return error.BitstreamOverflow;
 
+    // ---- v0.8: the 16x16 superblock layer ------------------------------
+    // Full 16x16 superblocks (aligned, non-mixed) can code as ONE unit:
+    //   flag 3 + subtype 0 = unified intra (DC pred + 16x16 TX, no mode bits)
+    //   flag 3 + subtype 1 = skip16 (one MV, 4 blocks copied)
+    //   flag 3 + subtype 2 = inter16 (one MV + 16x16 TX residual)
+    // The encoder trials the unified mode against the legacy 4x8x8 path with
+    // full stream/mode-map/recon rollback, and keeps whichever wins on
+    // SSE + lambda*bits. Gene-gated: sb16 <= 0.5 never writes flag 3 and the
+    // marker tree stays bit-exact legacy.
+    const sb16_on = gen.sb16On(g);
+    const SbSnap = struct {
+        const State = struct {
+            ac_n: usize = 0,
+            ac_low: u64 = 0,
+            ac_range: u32 = 0,
+            ac_cache: u8 = 0,
+            ac_cs: u32 = 0,
+            ps: Probs = undefined,
+            bw_n: usize = 0,
+            bw_bacc: u32 = 0,
+            bw_bn: u5 = 0,
+            mbacc: u32 = 0,
+            mbn: u5 = 0,
+            mmap_n: usize = 0,
+        };
+        fn snap(wv: *BlockW(ac_on), macc: u32, mb: u5, mn: usize) State {
+            var s = State{ .mbacc = macc, .mbn = mb, .mmap_n = mn };
+            if (ac_on) {
+                s.ac_n = wv.ac.n;
+                s.ac_low = wv.ac.low;
+                s.ac_range = wv.ac.range;
+                s.ac_cache = wv.ac.cache;
+                s.ac_cs = wv.ac.cache_size;
+                s.ps = wv.ps;
+            } else {
+                s.bw_n = wv.bw.n;
+                s.bw_bacc = wv.bw.bacc;
+                s.bw_bn = wv.bw.bn;
+            }
+            return s;
+        }
+        fn restore(wv: *BlockW(ac_on), s: State, macc: *u32, mb: *u5, mn: *usize) void {
+            if (ac_on) {
+                wv.ac.n = s.ac_n;
+                wv.ac.low = s.ac_low;
+                wv.ac.range = s.ac_range;
+                wv.ac.cache = s.ac_cache;
+                wv.ac.cache_size = s.ac_cs;
+                wv.ps = s.ps;
+            } else {
+                wv.bw.n = s.bw_n;
+                wv.bw.bacc = s.bw_bacc;
+                wv.bw.bn = s.bw_bn;
+            }
+            macc.* = s.mbacc;
+            mb.* = s.mbn;
+            mn.* = s.mmap_n;
+        }
+    };
+    const SbU = struct {
+        /// Encode one full superblock in unified mode (flag 3 + subtype +
+        /// payload) and write the recon into `encp`. Deterministic — the
+        /// caller runs it once as a trial, then again to commit.
+        fn encode(
+            cctx: *Ctx,
+            wv: *BlockW(ac_on),
+            srcp: []const u8,
+            sbase: usize,
+            encp: []u8,
+            prevp: []const u8,
+            pwv: usize,
+            phv: usize,
+            is_i_v: bool,
+            chroma_v: bool,
+            qp_v: f32,
+            iq_v: f32,
+            pq_v: f32,
+            gop_v: f32,
+            sxv: usize,
+            syv: usize,
+            fast: bool,
+        ) void {
+            const gg = cctx.g;
+            wv.markerSB(3, true);
+            var sb_src: [256]u8 = undefined;
+            var sr0: usize = 0;
+            while (sr0 < 16) : (sr0 += 1) {
+                @memcpy(sb_src[sr0 * 16 ..][0..16], srcp[sbase + (syv + sr0) * pwv + sxv ..][0..16]);
+            }
+            const by_v = syv / 8;
+            const by_n_v: f32 = (@as(f32, @floatFromInt(by_v)) + 0.5) / @as(f32, @floatFromInt(phv / 8));
+            if (is_i_v) {
+                // unified intra: DC prediction from recon neighbors + big TX
+                wv.markerSB(0, false);
+                const dc = dcPred16(encp, pwv, sxv, syv);
+                const pred: [256]u8 = @splat(dc);
+                var res: [256]u8 = undefined;
+                for (0..256) |k| {
+                    const d: i32 = @as(i32, sb_src[k]) - @as(i32, pred[k]);
+                    res[k] = @intCast(std.math.clamp(d + 128, 0, 255));
+                }
+                const rc = gen.RegCtx{ .mv_n = 0, .by_n = by_n_v, .gop = gop_v, .intra = true };
+                var lv: [256]i32 = undefined;
+                quantizeBlock16(cctx, res[0..], qp_v, iq_v, rc, &lv);
+                var last: usize = 0;
+                for (0..256) |k| {
+                    if (lv[k] != 0) last = k;
+                }
+                wv.levels16(lv[0..], last);
+                var deq: [256]f32 = undefined;
+                dequantLevels16(cctx, &lv, qp_v, iq_v, rc, &deq);
+                var rec: [256]u8 = undefined;
+                idct16(&deq, rec[0..], 16, &cctx.idct_calls);
+                const dst = encp[syv * pwv + sxv ..];
+                for (0..16) |r2| {
+                    for (0..16) |c2| {
+                        const v: i32 = @as(i32, pred[r2 * 16 + c2]) + @as(i32, rec[r2 * 16 + c2]) - 128;
+                        dst[r2 * pwv + c2] = @intCast(std.math.clamp(v, 0, 255));
+                    }
+                }
+            } else {
+                // unified inter: integer-MV SAD16 search, skip16 or big-TX
+                const rmax: i32 = if (chroma_v)
+                    @intCast(@max(1, gen.searchR(gg) / 2))
+                else
+                    @as(i32, @intCast(gen.searchR(gg)));
+                const ymin: i32 = -@as(i32, @intCast(@min(gen.searchR(gg), syv)));
+                const ymax: i32 = @intCast(@min(gen.searchR(gg), phv - 16 - syv));
+                const xmin: i32 = -@as(i32, @intCast(@min(gen.searchR(gg), sxv)));
+                const xmax: i32 = @intCast(@min(gen.searchR(gg), pwv - 16 - sxv));
+                var best: u64 = std.math.maxInt(u64);
+                var bdx: i32 = 0;
+                var bdy: i32 = 0;
+                var dy: i32 = ymin;
+                while (dy <= ymax) : (dy += 1) {
+                    if (dy < -rmax or dy > rmax) continue;
+                    var dx: i32 = xmin;
+                    while (dx <= xmax) : (dx += 1) {
+                        if (dx < -rmax or dx > rmax) continue;
+                        const ox: usize = @intCast(@as(i32, @intCast(sxv)) + dx);
+                        const oy: usize = @intCast(@as(i32, @intCast(syv)) + dy);
+                        var acc: u64 = 0;
+                        if (fast) {
+                            var fr: usize = 0;
+                            while (fr < 16) : (fr += 2) {
+                                var fc: usize = 0;
+                                while (fc < 16) : (fc += 2) {
+                                    acc += @abs(@as(i32, sb_src[fr * 16 + fc]) - @as(i32, prevp[oy * pwv + ox + fc]));
+                                }
+                            }
+                            acc *= 4;
+                        } else {
+                            for (0..16) |fr| {
+                                for (0..16) |fc| {
+                                    acc += @abs(@as(i32, sb_src[fr * 16 + fc]) - @as(i32, prevp[oy * pwv + ox + fc]));
+                                }
+                            }
+                        }
+                        if (acc < best) {
+                            best = acc;
+                            bdx = dx;
+                            bdy = dy;
+                        }
+                    }
+                }
+                const rc = gen.RegCtx{
+                    .mv_n = @min(1.0, (@as(f32, @floatFromInt(@abs(bdx))) + @as(f32, @floatFromInt(@abs(bdy)))) / 8.0),
+                    .by_n = by_n_v,
+                    .gop = gop_v,
+                    .intra = false,
+                };
+                const perpx: f32 = @as(f32, @floatFromInt(best)) / 256.0;
+                const skip_th = gen.regSkipTh(gg, rc, gen.skipTh(gg));
+                const ox_i: i32 = @as(i32, @intCast(sxv)) + bdx;
+                const oy_i: i32 = @as(i32, @intCast(syv)) + bdy;
+                if (perpx < skip_th) {
+                    wv.markerSB(1, false); // skip16: one MV, whole sb copied
+                    wv.mv(bdx, bdy);
+                    const dst = encp[syv * pwv + sxv ..];
+                    var r2: usize = 0;
+                    while (r2 < 16) : (r2 += 1) {
+                        @memcpy(dst[r2 * pwv ..][0..16], prevp[@as(usize, @intCast(oy_i + @as(i32, @intCast(r2)))) * pwv + @as(usize, @intCast(ox_i)) ..][0..16]);
+                    }
+                } else {
+                    wv.markerSB(2, false); // inter16: one MV + 16x16 TX residual
+                    wv.mv(bdx, bdy);
+                    var pred: [256]u8 = undefined;
+                    var r2: usize = 0;
+                    while (r2 < 16) : (r2 += 1) {
+                        @memcpy(pred[r2 * 16 ..][0..16], prevp[@as(usize, @intCast(oy_i + @as(i32, @intCast(r2)))) * pwv + @as(usize, @intCast(ox_i)) ..][0..16]);
+                    }
+                    var res: [256]u8 = undefined;
+                    for (0..256) |k| {
+                        const d: i32 = @as(i32, sb_src[k]) - @as(i32, pred[k]);
+                        res[k] = @intCast(std.math.clamp(d + 128, 0, 255));
+                    }
+                    var lv: [256]i32 = undefined;
+                    quantizeBlock16(cctx, res[0..], qp_v, pq_v, rc, &lv);
+                    var last: usize = 0;
+                    for (0..256) |k| {
+                        if (lv[k] != 0) last = k;
+                    }
+                    wv.levels16(lv[0..], last);
+                    var deq: [256]f32 = undefined;
+                    dequantLevels16(cctx, &lv, qp_v, pq_v, rc, &deq);
+                    var rec: [256]u8 = undefined;
+                    idct16(&deq, rec[0..], 16, &cctx.idct_calls);
+                    const dst = encp[syv * pwv + sxv ..];
+                    for (0..16) |r3| {
+                        for (0..16) |c3| {
+                            const v: i32 = @as(i32, pred[r3 * 16 + c3]) + @as(i32, rec[r3 * 16 + c3]) - 128;
+                            dst[r3 * pwv + c3] = @intCast(std.math.clamp(v, 0, 255));
+                        }
+                    }
+                }
+            }
+        }
+    }.encode;
+    const SbPend = struct {
+        s0: SbSnap.State,
+        recon0: [256]u8,
+        rate0: usize,
+        rate_b: usize,
+        err_b: u64,
+        sx0: usize,
+        sy0: usize,
+    };
+    var sb_pend: ?SbPend = null;
+
     var by: usize = 0;
     while (by < nby) : (by += 1) {
         const by_n: f32 = (@as(f32, @floatFromInt(by)) + 0.5) / @as(f32, @floatFromInt(nby));
@@ -1430,6 +1874,47 @@ fn encodePlaneT(
         while (bx < nbx) : (bx += 1) {
             const sx = bx * 8;
             const sy = by * 8;
+            // ---- v0.8 sb-start: trial the unified superblock mode ----------
+            const sb_full = (by % 2 == 0) and (bx % 2 == 0) and (by + 2 <= nby) and (bx + 2 <= nbx);
+            const sb_mixed = !is_i and do_refresh and (by == rrow or by + 1 == rrow);
+            if (sb16_on and sb_full and !sb_mixed) {
+                const s0 = SbSnap.snap(&w, mbacc, mbn, mmap_n);
+                const rate0: usize = if (ac_on) s0.ac_n else s0.bw_n;
+                var recon0: [256]u8 = undefined;
+                var sr1: usize = 0;
+                while (sr1 < 16) : (sr1 += 1) {
+                    @memcpy(recon0[sr1 * 16 ..][0..16], enc[(sy + sr1) * pw + sx ..][0..16]);
+                }
+                SbU(ctx, &w, src, src_base, enc, prev, pw, ph, is_i, chroma, qp, iq_scale, pq_scale, ctx.cur_gop, sx, sy, ctx.opts.fast_sad);
+                const rate_b = w.written() - rate0;
+                var err_b: u64 = 0;
+                var sr2: usize = 0;
+                while (sr2 < 16) : (sr2 += 1) {
+                    const srow = src[src_base + (sy + sr2) * pw + sx ..][0..16];
+                    const erow = enc[(sy + sr2) * pw + sx ..][0..16];
+                    for (0..16) |sc| {
+                        const dv: i32 = @as(i32, srow[sc]) - @as(i32, erow[sc]);
+                        err_b += @as(u64, @intCast(dv * dv));
+                    }
+                }
+                // roll back to S0: stream, mode map, recon region
+                SbSnap.restore(&w, s0, &mbacc, &mbn, &mmap_n);
+                var sr3: usize = 0;
+                while (sr3 < 16) : (sr3 += 1) {
+                    @memcpy(enc[(sy + sr3) * pw + sx ..][0..16], recon0[sr3 * 16 ..][0..16]);
+                }
+                // optimistic legacy: the sb flag precedes the four blocks
+                w.markerSB(0, true);
+                sb_pend = .{
+                    .s0 = s0,
+                    .recon0 = recon0,
+                    .rate0 = rate0,
+                    .rate_b = rate_b,
+                    .err_b = err_b,
+                    .sx0 = bx,
+                    .sy0 = by,
+                };
+            }
             // stage source block
             var r: usize = 0;
             while (r < 8) : (r += 1) {
@@ -1703,6 +2188,39 @@ fn encodePlaneT(
                     }
                 }
             }
+
+            // ---- v0.8 sb-end: keep unified only if it wins RD --------------
+            if (sb_pend) |pd| {
+                if (by == pd.sy0 + 1 and bx == pd.sx0 + 1) {
+                    var err_a: u64 = 0;
+                    var sr4: usize = 0;
+                    while (sr4 < 16) : (sr4 += 1) {
+                        const srow = src[src_base + (pd.sy0 * 8 + sr4) * pw + pd.sx0 * 8 ..][0..16];
+                        const erow = enc[(pd.sy0 * 8 + sr4) * pw + pd.sx0 * 8 ..][0..16];
+                        for (0..16) |sc| {
+                            const dv: i32 = @as(i32, srow[sc]) - @as(i32, erow[sc]);
+                            err_a += @as(u64, @intCast(dv * dv));
+                        }
+                    }
+                    const rate_a = w.written() - pd.rate0;
+                    const lam: f32 = 0.85 * qp * qp * (0.5 + (gen.sb16Gene(g) - 0.5) * 2.0);
+                    const cost_a = @as(f64, @floatFromInt(err_a)) + @as(f64, lam) * 8.0 * @as(f64, @floatFromInt(rate_a));
+                    const cost_b = @as(f64, @floatFromInt(pd.err_b)) + @as(f64, lam) * 8.0 * @as(f64, @floatFromInt(pd.rate_b));
+                    if (cost_b < cost_a) {
+                        // roll back the legacy sb and commit the unified one
+                        SbSnap.restore(&w, pd.s0, &mbacc, &mbn, &mmap_n);
+                        var sr5: usize = 0;
+                        while (sr5 < 16) : (sr5 += 1) {
+                            @memcpy(enc[(pd.sy0 * 8 + sr5) * pw + pd.sx0 * 8 ..][0..16], pd.recon0[sr5 * 16 ..][0..16]);
+                        }
+                        SbU(ctx, &w, src, src_base, enc, prev, pw, ph, is_i, chroma, qp, iq_scale, pq_scale, ctx.cur_gop, pd.sx0 * 8, pd.sy0 * 8, ctx.opts.fast_sad);
+                        bx += 1; // skip the sb's 2nd column (loop ++ lands on the next sb)
+                        sb_pend = null;
+                        continue;
+                    }
+                    sb_pend = null;
+                }
+            }
         }
     }
 
@@ -1826,13 +2344,102 @@ fn decodePlaneT(
     // arithmetic coder; both start right after the mode map, byte-aligned.
     var r = try BlockR(ac_on).init(&ctx.br);
 
+    // v0.8: columns of an odd block row already covered by a unified 16x16
+    // superblock decoded in the even row above (skipped, no syntax there).
+    const sb16_on = gen.sb16On(g);
+    if (sb16_on and nbx > 256) return error.PlaneTooWide;
+    var skipmap: [256]bool = @splat(false);
+
     var by: usize = 0;
     while (by < nby) : (by += 1) {
         const by_n: f32 = (@as(f32, @floatFromInt(by)) + 0.5) / @as(f32, @floatFromInt(nby));
+        // v0.8: fresh even row — stale coverage from the previous odd row is gone
+        if (sb16_on and (by % 2) == 0) {
+            for (0..nbx) |ci| skipmap[ci] = false;
+        }
         var bx: usize = 0;
         while (bx < nbx) : (bx += 1) {
             const sx = bx * 8;
             const sy = by * 8;
+            // v0.8: this block belongs to a unified superblock from the row
+            // above — its pixels are already decoded, no syntax to consume.
+            if (sb16_on and (by % 2) == 1 and skipmap[bx]) {
+                continue;
+            }
+            // v0.8 sb-start: full aligned non-mixed superblocks carry one
+            // wide marker — 3 = unified (subtype 0 intra16 / 1 skip16 /
+            // 2 inter16), 0 = legacy 4-block path follows.
+            const sb_full = (by % 2 == 0) and (bx % 2 == 0) and (by + 2 <= nby) and (bx + 2 <= nbx);
+            const sb_mixed = !is_i and do_refresh and (by == rrow or by + 1 == rrow);
+            if (sb16_on and sb_full and !sb_mixed) {
+                const flag = try r.markerSB(true);
+                if (flag == 3) {
+                    const sub = try r.markerSB(false);
+                    const by_n_v: f32 = by_n; // top row of the sb == current row
+                    if (sub == 0) {
+                        // unified intra16: DC pred + big TX, no mode-map bits
+                        const dc = dcPred16(cur, pw, sx, sy);
+                        const pred: [256]u8 = @splat(dc);
+                        const rc = gen.RegCtx{ .mv_n = 0, .by_n = by_n_v, .gop = ctx.cur_gop, .intra = true };
+                        var coef: [256]f32 = @splat(0);
+                        try r.levels16(g, qp, iq_scale, rc, &coef);
+                        var rec: [256]u8 = undefined;
+                        idct16(&coef, rec[0..], 16, &ctx.idct_calls);
+                        const dst = cur[sy * pw + sx ..];
+                        for (0..16) |rr| {
+                            for (0..16) |cc| {
+                                const v: i32 = @as(i32, pred[rr * 16 + cc]) + @as(i32, rec[rr * 16 + cc]) - 128;
+                                dst[rr * pw + cc] = @intCast(std.math.clamp(v, 0, 255));
+                            }
+                        }
+                    } else {
+                        if (sub > 2) return error.Corrupt;
+                        const mv2 = try r.mvPair();
+                        const dx = mv2[0];
+                        const dy = mv2[1];
+                        const rc = gen.RegCtx{
+                            .mv_n = @min(1.0, (@as(f32, @floatFromInt(@abs(dx))) + @as(f32, @floatFromInt(@abs(dy)))) / 8.0),
+                            .by_n = by_n_v,
+                            .gop = ctx.cur_gop,
+                            .intra = false,
+                        };
+                        const ox_i: i32 = @as(i32, @intCast(sx)) + dx;
+                        const oy_i: i32 = @as(i32, @intCast(sy)) + dy;
+                        if (sub == 1) {
+                            // skip16: whole sb copied from the reference
+                            const dst = cur[sy * pw + sx ..];
+                            for (0..16) |rr| {
+                                @memcpy(dst[rr * pw ..][0..16], prev[@as(usize, @intCast(oy_i + @as(i32, @intCast(rr)))) * pw + @as(usize, @intCast(ox_i)) ..][0..16]);
+                            }
+                        } else {
+                            // inter16: one MV + 16x16 TX residual
+                            var pred: [256]u8 = undefined;
+                            for (0..16) |rr| {
+                                @memcpy(pred[rr * 16 ..][0..16], prev[@as(usize, @intCast(oy_i + @as(i32, @intCast(rr)))) * pw + @as(usize, @intCast(ox_i)) ..][0..16]);
+                            }
+                            var coef: [256]f32 = @splat(0);
+                            try r.levels16(g, qp, pq_scale, rc, &coef);
+                            var rec: [256]u8 = undefined;
+                            idct16(&coef, rec[0..], 16, &ctx.idct_calls);
+                            const dst = cur[sy * pw + sx ..];
+                            for (0..16) |rr| {
+                                for (0..16) |cc| {
+                                    const v: i32 = @as(i32, pred[rr * 16 + cc]) + @as(i32, rec[rr * 16 + cc]) - 128;
+                                    dst[rr * pw + cc] = @intCast(std.math.clamp(v, 0, 255));
+                                }
+                            }
+                        }
+                    }
+                    // mark the odd-row columns as covered, skip the 2nd column
+                    skipmap[bx] = true;
+                    skipmap[bx + 1] = true;
+                    bx += 1;
+                    continue;
+                } else if (flag != 0) {
+                    return error.Corrupt;
+                }
+                // flag == 0: legacy superblock — fall through to per-block
+            }
             const force_intra = is_i or (do_refresh and by == rrow);
             var rc = gen.RegCtx{
                 .mv_n = 0,
@@ -2506,4 +3113,155 @@ test "deblock pair clamps and preserves flat regions" {
     deblockPair(&a, &b, 77, 77, 50.0, 25.0);
     try std.testing.expectEqual(@as(u8, 77), a);
     try std.testing.expectEqual(@as(u8, 77), b);
+}
+
+// ============================================================ v0.8: 16x16 superblock layer
+
+fn genomeWithV8(id: u64, intra: f32, deb: f32, entropy: f32, cfl: f32, cdef: f32, qpel: f32, sb16: f32) gen.Genome {
+    var g = genomeWithV5b(id, intra, deb, entropy, cfl, cdef, qpel);
+    g.g[22] = sb16;
+    return g;
+}
+
+/// Encode a whole clip and return the total bitstream byte count (no decode).
+fn encodeAllBytes(alloc: std.mem.Allocator, clip: *const yuv.Clip, g: *const gen.Genome) !usize {
+    initDct();
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const p1Y = try a.alloc(u8, clip.ysz);
+    const p2Y = try a.alloc(u8, clip.ysz);
+    const p1U = try a.alloc(u8, clip.csz);
+    const p2U = try a.alloc(u8, clip.csz);
+    const p1V = try a.alloc(u8, clip.csz);
+    const p2V = try a.alloc(u8, clip.csz);
+    @memset(p1Y, 128);
+    @memset(p2Y, 128);
+    @memset(p1U, 128);
+    @memset(p2U, 128);
+    @memset(p1V, 128);
+    @memset(p2V, 128);
+    const bitbuf = try a.alloc(u8, 8 * 1024 * 1024);
+    var ctx = Ctx{
+        .clip = clip,
+        .g = g,
+        .opts = .{},
+        .encY = p1Y,
+        .encU = p1U,
+        .encV = p1V,
+        .prevY = p2Y,
+        .prevU = p2U,
+        .prevV = p2V,
+        .decY = p1Y,
+        .decU = p1U,
+        .decV = p1V,
+        .bw = .{ .buf = bitbuf },
+        .br = .{ .buf = "" },
+        .scratch = try a.alloc(u8, 1 << 20),
+        .cdef_buf = try a.alloc(u8, clip.ysz),
+        .mcH = try a.alloc(u8, clip.ysz),
+        .mcV = try a.alloc(u8, clip.ysz),
+        .mcD = try a.alloc(u8, clip.ysz),
+    };
+    for (0..clip.frames) |fi| {
+        try encodeFrame(&ctx, @intCast(fi));
+    }
+    return ctx.bw.n;
+}
+
+// THE v0.8 invariant: with the 16x16 superblock layer enabled the decoder
+// output must stay byte-exact equal to the encoder recon, across feature
+// combinations (entropy coder vs byte path, qpel, CFL, deblocking).
+test "v0.8 closed loop holds with the superblock layer on" {
+    const alloc = std.testing.allocator;
+    var clip = try synthClip(alloc, 64, 64, 6);
+    defer alloc.free(clip.y);
+    defer alloc.free(clip.u);
+    defer alloc.free(clip.v);
+
+    const variants = [_]gen.Genome{
+        genomeWithV8(1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.9), // sb16 alone (byte path)
+        genomeWithV8(2, 0.9, 0.6, 0.9, 0.9, 0.9, 0.9, 0.6), // everything on (AC path)
+        genomeWithV8(3, 0.9, 0.0, 0.0, 0.9, 0.0, 0.0, 1.0), // intra modes + CFL + sb16 max
+        genomeWithV8(4, 0.0, 0.6, 0.9, 0.0, 0.9, 0.9, 0.75), // entropy + cdef + qpel + sb16
+    };
+    for (&variants) |*g| {
+        var reports = std.ArrayList(DebugReport).empty;
+        defer reports.deinit(alloc);
+        try debugRoundtrip(alloc, &clip, g, .{}, &reports, alloc);
+        try std.testing.expectEqual(@as(usize, 6), reports.items.len);
+        for (reports.items) |r| {
+            try std.testing.expectEqual(@as(i32, -1), r.first_bad_block);
+            try std.testing.expectEqual(@as(u32, 0), r.max_delta);
+            try std.testing.expect(r.enc_y_psnr > 9.0);
+        }
+    }
+}
+
+// Migration invariant: anything <= 0.5 on the v0.8 gene must reproduce the
+// v0.5b bitstream byte-for-byte.
+test "v0.8 sb16 gene at 0 reproduces v0.5b bytes exactly" {
+    const alloc = std.testing.allocator;
+    var clip = try synthClip(alloc, 64, 64, 4);
+    defer alloc.free(clip.y);
+    defer alloc.free(clip.u);
+    defer alloc.free(clip.v);
+
+    var g0 = genomeWithV5b(11, 0.9, 0.6, 0.9, 0.9, 0.9, 0.9);
+    g0.g[22] = 0.0;
+    var g4 = g0;
+    g4.id = 12;
+    g4.g[22] = 0.4; // still off
+    const b0 = try encodeAllBytes(alloc, &clip, &g0);
+    const b4 = try encodeAllBytes(alloc, &clip, &g4);
+    try std.testing.expectEqual(b0, b4);
+}
+
+// Engagement: on the synthetic corpus (smooth drift + boxes + flat chroma)
+// the RD decision must actually pick unified superblocks somewhere, and the
+// closed loop must survive it (covered above). Bytes change is the proof the
+// layer is live, not dead code.
+test "v0.8 superblock layer engages on smooth content" {
+    const alloc = std.testing.allocator;
+    var clip = try synthClip(alloc, 64, 64, 4);
+    defer alloc.free(clip.y);
+    defer alloc.free(clip.u);
+    defer alloc.free(clip.v);
+
+    var g_off = genomeWithV8(21, 0.9, 0.6, 0.9, 0.9, 0.9, 0.9, 0.0);
+    var g_on = genomeWithV8(22, 0.9, 0.6, 0.9, 0.9, 0.9, 0.9, 1.0);
+    const b_off = try encodeAllBytes(alloc, &clip, &g_off);
+    const b_on = try encodeAllBytes(alloc, &clip, &g_on);
+    try std.testing.expect(b_on != b_off);
+    // rate sanity: the layer must never explode the stream
+    try std.testing.expect(b_on < b_off * 2);
+}
+
+// Migration at the pop-file level: a legacy 33-token v5 line and the same
+// line with the v0.8 gene inserted at 0.0 decode to identical genomes.
+test "v0.8 pop-line migration: v5 33-token line == v6 34-token line" {
+    var buf: [4096]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const wr = fbs.writer();
+    try wr.print("170007151 28 170006756 170006902 12", .{});
+    for (0..22) |i| try wr.print(" {d:.4}", .{@as(f32, @floatFromInt(i % 7)) / 8.0});
+    for (0..6) |i| try wr.print(" {d:.4}", .{@as(f32, @floatFromInt(i % 5)) / 4.0});
+    const v5 = fbs.getWritten();
+    const g5 = (try gen.parseLine(v5)).?;
+    try std.testing.expectEqual(@as(f32, 0.0), g5.g[22]); // migrated to legacy
+
+    // v6: header + 22 genes + sb16 + 6 regs
+    var buf2: [4096]u8 = undefined;
+    var fbs2 = std.io.fixedBufferStream(&buf2);
+    const wr2 = fbs2.writer();
+    try wr2.print("170007151 28 170006756 170006902 12", .{});
+    for (0..22) |i| try wr2.print(" {d:.4}", .{@as(f32, @floatFromInt(i % 7)) / 8.0});
+    try wr2.print(" 0.0000", .{});
+    for (0..6) |i| try wr2.print(" {d:.4}", .{@as(f32, @floatFromInt(i % 5)) / 4.0});
+    const v6 = fbs2.getWritten();
+    const g6 = (try gen.parseLine(v6)).?;
+    try std.testing.expectEqual(g5.id, g6.id);
+    try std.testing.expectEqualSlices(f32, &g5.g, &g6.g);
+    try std.testing.expectEqualSlices(f32, &g5.reg, &g6.reg);
+    try std.testing.expect(!gen.sb16On(&g6));
 }
