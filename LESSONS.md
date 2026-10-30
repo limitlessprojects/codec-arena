@@ -4227,3 +4227,34 @@ rewards blur; MS-SSIM re-steepens the gradient where the arena was stuck.
 - gen 14 shard 9 (fit 5.785): adaptq -0.089
 - gen 15 shard 9 (fit 5.648): adaptq -0.132
 - gen 26 shard 9 (fit 7.006): adaptq +0.084
+
+## Merge run 43
+
+- gen 26 shard 2 (fit 5.498): p_qmul +0.086
+- gen 0 shard 3 (fit 6.154): dz_dc -0.39, deblock +0.33, entropy +0.318, deadzone +0.3, refresh +0.265
+- gen 17 shard 3 (fit 5.71): search -0.094
+- gen 0 shard 4 (fit 4.468): dz_dc -0.402, entropy +0.332, deblock +0.323, keyint -0.265, mv_dz -0.262
+- gen 3 shard 4 (fit 5.972): adaptq -0.08
+- gen 6 shard 4 (fit 4.569): search -0.084
+- gen 0 shard 5 (fit 6.565): dz_dc -0.412, deblock +0.354, entropy +0.354, deadzone +0.304, refresh +0.279
+- gen 1 shard 5 (fit 7.36): deblock +0.084
+- gen 0 shard 6 (fit 6.553): dz_dc -0.425, entropy +0.369, keyint -0.303, deblock +0.303, deadzone +0.281
+- gen 6 shard 6 (fit 4.829): gop_q -0.15
+- gen 7 shard 6 (fit 5.068): gop_q -0.127, intra_gop -0.106
+- gen 8 shard 6 (fit 5.202): gop_q -0.311
+- gen 9 shard 6 (fit 8.171): gop_q +0.145, intra_gop +0.093
+- gen 10 shard 6 (fit 6.585): gop_q -0.323
+- gen 11 shard 6 (fit 4.939): gop_q -0.625
+- gen 12 shard 6 (fit 7.107): gop_q -0.258
+- gen 13 shard 6 (fit 6.34): gop_q -0.103
+- gen 14 shard 6 (fit 7.094): gop_q -0.188
+- gen 15 shard 6 (fit 8.211): gop_q -0.093
+- gen 0 shard 7 (fit 6.154): dz_dc -0.388, entropy +0.356, deblock +0.328, refresh +0.283, deadzone +0.281
+- gen 11 shard 7 (fit 7.398): halfpel -0.107
+- gen 13 shard 7 (fit 7.161): halfpel -0.09
+- gen 19 shard 7 (fit 5.75): adaptq -0.081
+- gen 25 shard 7 (fit 5.085): halfpel +0.09
+- gen 26 shard 7 (fit 4.541): halfpel -0.08
+- gen 27 shard 7 (fit 5.804): halfpel -0.081
+- gen 0 shard 8 (fit 4.096): dz_dc -0.428, entropy +0.381, deblock +0.355, deadzone +0.296, refresh +0.276
+- gen 0 shard 9 (fit 7.048): dz_dc -0.397, entropy +0.362, deblock +0.351, refresh +0.3, deadzone +0.273
