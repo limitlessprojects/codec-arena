@@ -189,16 +189,15 @@ pub fn parseLine(line: []const u8) !?Genome {
 
 /// Emit a v6 pop-file line (34 tokens).
 pub fn formatLine(g: *const Genome, buf: []u8) ![]const u8 {
-    var fbs = std.io.fixedBufferStream(buf);
-    const w = fbs.writer();
-    try w.print("{d} {d} {d} {d} {d}", .{ g.id, g.gen, g.pa, g.pb, g.tribe });
+    var w: std.Io.Writer = .fixed(buf);
+    w.print("{d} {d} {d} {d} {d}", .{ g.id, g.gen, g.pa, g.pb, g.tribe }) catch return error.NoSpaceLeft;
     for (0..NG) |i| {
-        try w.print(" {d:.4}", .{g.g[i]});
+        w.print(" {d:.4}", .{g.g[i]}) catch return error.NoSpaceLeft;
     }
     for (0..NR) |i| {
-        try w.print(" {d:.4}", .{g.reg[i]});
+        w.print(" {d:.4}", .{g.reg[i]}) catch return error.NoSpaceLeft;
     }
-    return fbs.getWritten();
+    return w.buffered();
 }
 
 // ---- gene mappings (the phenotype) ----
@@ -328,7 +327,7 @@ test "parse and format v3 lines round-trip" {
     var ntok: usize = 0;
     var it = std.mem.tokenizeAny(u8, line, " ");
     while (it.next()) |_| ntok += 1;
-    try std.testing.expectEqual(@as(usize, 29), ntok);
+    try std.testing.expectEqual(@as(usize, 34), ntok);
 }
 
 test "parse and format v4 lines round-trip all 21 effectors" {
@@ -351,9 +350,9 @@ test "parse and format v4 lines round-trip all 21 effectors" {
     var ntok: usize = 0;
     var it = std.mem.tokenizeAny(u8, line, " ");
     while (it.next()) |_| ntok += 1;
-    // formatLine emits the full v5 width (22 eff + 6 reg); a v4-era line
+    // formatLine emits the full v6 width (23 eff + 6 reg); a v4-era line
     // round-trips through migration (g[21] qpel reads back as written).
-    try std.testing.expectEqual(@as(usize, 33), ntok);
+    try std.testing.expectEqual(@as(usize, 34), ntok);
 }
 
 test "v4 line migrates qpel to legacy 0.0; v5 line round-trips" {

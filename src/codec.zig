@@ -1722,6 +1722,7 @@ fn encodePlaneT(
         ) void {
             const gg = cctx.g;
             wv.markerSB(3, true);
+            if (cctx.debug_px) std.debug.print("ENC sb flag3 ({d},{d})\n", .{ sxv / 8, syv / 8 });
             var sb_src: [256]u8 = undefined;
             var sr0: usize = 0;
             while (sr0 < 16) : (sr0 += 1) {
@@ -1905,6 +1906,7 @@ fn encodePlaneT(
                 }
                 // optimistic legacy: the sb flag precedes the four blocks
                 w.markerSB(0, true);
+                if (ctx.debug_px) std.debug.print("ENC sb flag0 ({d},{d}) @n={d}\n", .{ bx, by, w.bw.n });
                 sb_pend = .{
                     .s0 = s0,
                     .recon0 = recon0,
@@ -1935,6 +1937,7 @@ fn encodePlaneT(
                 var lv: [64]i32 = undefined;
                 if (modes.len == 1) {
                     // legacy: raw block into DCT — no prediction, no mode code
+                    if (ctx.debug_px) std.debug.print("ENC legacy blk ({d},{d}) @n={d}\n", .{ bx, by, w.bw.n });
                     quantizeBlock(ctx, ctx.block_src[0..64], qp, iq_scale, rc, &lv);
                     var last: usize = 0;
                     for (0..64) |k| {
@@ -2373,6 +2376,7 @@ fn decodePlaneT(
             const sb_mixed = !is_i and do_refresh and (by == rrow or by + 1 == rrow);
             if (sb16_on and sb_full and !sb_mixed) {
                 const flag = try r.markerSB(true);
+                if (ctx.debug_px) std.debug.print("DEC sb flag ({d},{d}) = {d} @p={d}\n", .{ bx, by, flag, ctx.br.p });
                 if (flag == 3) {
                     const sub = try r.markerSB(false);
                     const by_n_v: f32 = by_n; // top row of the sb == current row
@@ -2430,6 +2434,7 @@ fn decodePlaneT(
                             }
                         }
                     }
+                    if (ctx.debug_px) std.debug.print("DEC unified ({d},{d}) sub={d}\n", .{ bx, by, sub });
                     // mark the odd-row columns as covered, skip the 2nd column
                     skipmap[bx] = true;
                     skipmap[bx + 1] = true;
@@ -2452,6 +2457,7 @@ fn decodePlaneT(
                 if (!is_i) _ = try r.marker(); // intra-in-P marker
                 if (modes.len == 1) {
                     // legacy: no mode byte, raw-DCT recon
+                    if (ctx.debug_px) std.debug.print("DEC legacy blk ({d},{d}) @p={d}\n", .{ bx, by, ctx.br.p });
                     var coef: [64]f32 = @splat(0);
                     try r.levels(g, qp, iq_scale, rc, &coef);
                     idct8(&coef, cur[sy * pw + sx ..], pw, &ctx.idct_calls);
@@ -3241,27 +3247,59 @@ test "v0.8 superblock layer engages on smooth content" {
 // line with the v0.8 gene inserted at 0.0 decode to identical genomes.
 test "v0.8 pop-line migration: v5 33-token line == v6 34-token line" {
     var buf: [4096]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const wr = fbs.writer();
+    var wr: std.Io.Writer = .fixed(&buf);
     try wr.print("170007151 28 170006756 170006902 12", .{});
     for (0..22) |i| try wr.print(" {d:.4}", .{@as(f32, @floatFromInt(i % 7)) / 8.0});
     for (0..6) |i| try wr.print(" {d:.4}", .{@as(f32, @floatFromInt(i % 5)) / 4.0});
-    const v5 = fbs.getWritten();
+    const v5 = wr.buffered();
     const g5 = (try gen.parseLine(v5)).?;
     try std.testing.expectEqual(@as(f32, 0.0), g5.g[22]); // migrated to legacy
 
     // v6: header + 22 genes + sb16 + 6 regs
     var buf2: [4096]u8 = undefined;
-    var fbs2 = std.io.fixedBufferStream(&buf2);
-    const wr2 = fbs2.writer();
+    var wr2: std.Io.Writer = .fixed(&buf2);
     try wr2.print("170007151 28 170006756 170006902 12", .{});
     for (0..22) |i| try wr2.print(" {d:.4}", .{@as(f32, @floatFromInt(i % 7)) / 8.0});
     try wr2.print(" 0.0000", .{});
     for (0..6) |i| try wr2.print(" {d:.4}", .{@as(f32, @floatFromInt(i % 5)) / 4.0});
-    const v6 = fbs2.getWritten();
+    const v6 = wr2.buffered();
     const g6 = (try gen.parseLine(v6)).?;
     try std.testing.expectEqual(g5.id, g6.id);
     try std.testing.expectEqualSlices(f32, &g5.g, &g6.g);
     try std.testing.expectEqualSlices(f32, &g5.reg, &g6.reg);
     try std.testing.expect(!gen.sb16On(&g6));
+}
+
+// TEMP DEBUG: real-clip reproduction (removed after fix)
+test "TEMP v0.8 real clip desync repro" {
+    const alloc = std.testing.allocator;
+    var clip = try synthClip(alloc, 320, 192, 24);
+    defer alloc.free(clip.y);
+    defer alloc.free(clip.u);
+    defer alloc.free(clip.v);
+    // keyint=1 -> every frame is an I-frame (isolates the intra16 path)
+    var g = genomeWithV8(900077, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+    g.g[0] = 0.0;
+    var reports = std.ArrayList(DebugReport).empty;
+    defer reports.deinit(alloc);
+    try debugRoundtrip(alloc, &clip, &g, .{}, &reports, alloc);
+    for (reports.items) |r| {
+        std.debug.print("I-frame {d}: enc={d:.2} dec={d:.2} bad={d} maxd={d}\n", .{ r.frame, r.enc_y_psnr, r.dec_y_psnr, r.first_bad_block, r.max_delta });
+    }
+}
+
+test "TEMP v0.8 P-frame path repro" {
+    const alloc = std.testing.allocator;
+    var clip = try synthClip(alloc, 64, 64, 6);
+    defer alloc.free(clip.y);
+    defer alloc.free(clip.u);
+    defer alloc.free(clip.v);
+    var g2 = genomeWithV8(78, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+    g2.g[0] = 1.0;
+    var reports2 = std.ArrayList(DebugReport).empty;
+    defer reports2.deinit(alloc);
+    try debugRoundtrip(alloc, &clip, &g2, .{}, &reports2, alloc);
+    for (reports2.items) |r| {
+        std.debug.print("P-frame {d}: enc={d:.2} dec={d:.2} bad={d} maxd={d}\n", .{ r.frame, r.enc_y_psnr, r.dec_y_psnr, r.first_bad_block, r.max_delta });
+    }
 }
