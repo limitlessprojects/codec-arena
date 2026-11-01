@@ -4299,3 +4299,34 @@ rewards blur; MS-SSIM re-steepens the gradient where the arena was stuck.
 - gen 0 shard 8 (fit 3.721): entropy +0.311, dz_dc -0.278, deblock +0.277, refresh +0.26, intra_pred -0.257
 - gen 0 shard 9 (fit 4.668): deblock +0.229, intra_pred -0.21, deadzone +0.19, entropy +0.185, keyint -0.179
 - gen 12 shard 9 (fit 2.541): p_qmul +0.092
+
+## Merge run 46
+
+- gen 0 shard 3 (fit 4.723): deblock +0.212, dz_dc -0.202, deadzone +0.202, baseq +0.19, entropy +0.188
+- gen 0 shard 4 (fit 4.898): deadzone +0.248, deblock +0.24, intra_pred -0.214, dz_dc -0.213, baseq +0.195
+- gen 8 shard 4 (fit 3.429): skip +0.087
+- gen 12 shard 4 (fit 4.687): cfl +0.086
+- gen 13 shard 4 (fit 2.963): cfl +0.129
+- gen 14 shard 4 (fit 2.89): p_qmul +0.138
+- gen 0 shard 5 (fit 5.203): dz_dc -0.206, deadzone +0.205, deblock +0.201, intra_pred -0.19, entropy +0.187
+- gen 6 shard 5 (fit 1.43): p_qmul +0.092
+- gen 11 shard 5 (fit 3.552): p_qmul +0.099
+- gen 26 shard 5 (fit 2.217): search -0.101
+- gen 0 shard 6 (fit 2.343): deadzone +0.281, deblock +0.24, baseq +0.217, intra_pred -0.206, keyint -0.201
+- gen 12 shard 6 (fit 5.016): qpel +0.107
+- gen 21 shard 6 (fit 5.098): qpel +0.099
+- gen 22 shard 6 (fit 3.772): qpel +0.081
+- gen 24 shard 6 (fit 2.945): qpel +0.116
+- gen 0 shard 7 (fit 4.083): deadzone +0.265, deblock +0.261, intra_pred -0.244, dz_dc -0.222, baseq +0.216
+- gen 2 shard 7 (fit 1.633): skip +0.154
+- gen 4 shard 7 (fit 2.906): skip +0.176
+- gen 5 shard 7 (fit 4.726): skip -0.11
+- gen 13 shard 7 (fit 3.224): p_qmul +0.087
+- gen 18 shard 7 (fit 3.344): p_qmul +0.097
+- gen 19 shard 7 (fit 1.071): p_qmul +0.098
+- gen 0 shard 8 (fit 4.037): deadzone +0.238, entropy +0.238, intra_pred -0.231, deblock +0.226, dz_dc -0.214
+- gen 12 shard 8 (fit 2.535): p_qmul +0.086
+- gen 0 shard 9 (fit 3.456): dz_dc -0.27, deblock +0.253, deadzone +0.25, entropy +0.239, refresh +0.236
+- gen 9 shard 9 (fit 4.593): deblock -0.08
+- gen 16 shard 9 (fit 3.211): deblock +0.088
+- gen 27 shard 9 (fit 4.858): deblock -0.081
