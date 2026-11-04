@@ -4330,3 +4330,36 @@ rewards blur; MS-SSIM re-steepens the gradient where the arena was stuck.
 - gen 9 shard 9 (fit 4.593): deblock -0.08
 - gen 16 shard 9 (fit 3.211): deblock +0.088
 - gen 27 shard 9 (fit 4.858): deblock -0.081
+
+## Merge run 47
+
+- gen 0 shard 3 (fit 3.853): deadzone +0.299, deblock +0.253, dz_dc -0.248, entropy +0.234, refresh +0.215
+- gen 5 shard 3 (fit 3.651): skip -0.081
+- gen 0 shard 4 (fit 2.468): intra_pred -0.248, deblock +0.244, deadzone +0.222, dz_dc -0.216, baseq +0.209
+- gen 12 shard 4 (fit 3.567): search -0.086
+- gen 15 shard 4 (fit 3.105): p_qmul +0.091
+- gen 0 shard 5 (fit 3.007): dz_dc -0.272, deblock +0.271, entropy +0.257, intra_pred -0.246, keyint -0.243
+- gen 3 shard 5 (fit 3.205): skip +0.083
+- gen 4 shard 5 (fit 3.563): skip +0.147
+- gen 5 shard 5 (fit 5.129): skip -0.1
+- gen 10 shard 5 (fit 1.422): p_qmul +0.108
+- gen 0 shard 6 (fit 4.872): deblock +0.339, entropy +0.326, intra_pred -0.312, baseq +0.295, dz_dc -0.274
+- gen 1 shard 6 (fit 2.831): deblock +0.128, dz_dc -0.118, refresh +0.114, baseq +0.101, deadzone +0.093
+- gen 7 shard 6 (fit 3.131): skip +0.081
+- gen 11 shard 6 (fit 2.668): skip +0.092
+- gen 14 shard 6 (fit 1.105): skip +0.103
+- gen 15 shard 6 (fit 4.72): skip -0.106
+- gen 16 shard 6 (fit 2.384): skip -0.085
+- gen 22 shard 6 (fit 4.792): intra_gop -0.111
+- gen 0 shard 7 (fit 3.5): deblock +0.197, intra_pred -0.191, entropy +0.191, baseq +0.183, keyint -0.182
+- gen 9 shard 7 (fit 3.814): deblock +0.098
+- gen 12 shard 7 (fit 3.558): p_qmul +0.13
+- gen 19 shard 7 (fit 4.574): entropy +0.083
+- gen 27 shard 7 (fit 3.124): deblock -0.109
+- gen 0 shard 8 (fit 2.524): baseq +0.181, deadzone +0.169, deblock +0.165, keyint -0.158, dz_dc -0.156
+- gen 4 shard 8 (fit 3.552): skip +0.102
+- gen 19 shard 8 (fit 4.712): search -0.094
+- gen 0 shard 9 (fit 2.981): intra_pred -0.257, deblock +0.244, baseq +0.208, deadzone +0.2, dz_dc -0.195
+- gen 4 shard 9 (fit 3.587): skip +0.123
+- gen 14 shard 9 (fit 5.264): gop_q -0.087
+- gen 27 shard 9 (fit 5.419): intra_pred +0.085
