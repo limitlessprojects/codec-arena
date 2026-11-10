@@ -4454,3 +4454,38 @@ rewards blur; MS-SSIM re-steepens the gradient where the arena was stuck.
 - gen 22 shard 8 (fit 3.418): deblock +0.089
 - gen 0 shard 9 (fit 4.494): entropy +0.266, deblock +0.262, deadzone +0.248, baseq +0.242, keyint -0.241
 - gen 16 shard 9 (fit 3.885): chroma_q +0.092
+
+## Merge run 52
+
+- gen 0 shard 3 (fit 5.467): deblock +0.321, deadzone +0.314, entropy +0.308, dz_dc -0.301, refresh +0.293
+- gen 1 shard 3 (fit 4.898): deblock +0.095
+- gen 7 shard 3 (fit 3.945): p_qmul +0.141
+- gen 8 shard 3 (fit 3.886): p_qmul +0.092
+- gen 0 shard 4 (fit 4.666): intra_pred -0.257, deblock +0.237, deadzone +0.211, entropy +0.201, dz_dc -0.198
+- gen 3 shard 4 (fit 3.337): skip +0.126
+- gen 5 shard 4 (fit 2.671): skip +0.179
+- gen 6 shard 4 (fit 3.376): skip -0.119
+- gen 9 shard 4 (fit 2.588): gop_q -0.207
+- gen 10 shard 4 (fit 4.249): gop_q +0.102
+- gen 12 shard 4 (fit 0.956): gop_q -0.107
+- gen 13 shard 4 (fit 4.197): gop_q +0.098
+- gen 21 shard 4 (fit 4.803): halfpel -0.082
+- gen 0 shard 5 (fit 3.724): deblock +0.202, entropy +0.17, dz_dc -0.164, deadzone +0.157, baseq +0.147
+- gen 19 shard 5 (fit 4.716): intra_pred -0.097
+- gen 22 shard 5 (fit 3.279): intra_pred +0.088
+- gen 0 shard 6 (fit 2.664): dz_dc -0.224, deblock +0.212, intra_pred -0.209, entropy +0.197, deadzone +0.192
+- gen 3 shard 6 (fit 3.816): skip +0.098
+- gen 0 shard 7 (fit 1.59): deadzone +0.279, deblock +0.265, dz_dc -0.264, refresh +0.239, intra_pred -0.234
+- gen 14 shard 7 (fit 4.6): gop_q +0.098
+- gen 17 shard 7 (fit 2.704): gop_q -0.096
+- gen 20 shard 7 (fit 3.301): gop_q -0.091
+- gen 26 shard 7 (fit 1.545): gop_q -0.126
+- gen 0 shard 8 (fit 2.29): deadzone +0.228, deblock +0.217, keyint -0.212, baseq +0.18, dz_dc -0.176
+- gen 5 shard 8 (fit 1.978): gop_q -0.087
+- gen 16 shard 8 (fit 2.615): qpel +0.092
+- gen 21 shard 8 (fit 4.914): q_low -0.127
+- gen 22 shard 8 (fit 4.797): q_low -0.112
+- gen 23 shard 8 (fit 4.723): q_low -0.112
+- gen 24 shard 8 (fit 2.667): q_low +0.189, gop_q +0.09
+- gen 27 shard 8 (fit 2.687): q_low +0.122, gop_q +0.09
+- gen 0 shard 9 (fit 4.189): deadzone +0.193, deblock +0.182, dz_dc -0.172, keyint -0.165, intra_pred -0.163
