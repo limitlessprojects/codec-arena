@@ -4515,3 +4515,35 @@ rewards blur; MS-SSIM re-steepens the gradient where the arena was stuck.
 - gen 0 shard 9 (fit 3.454): dz_dc -0.289, deblock +0.288, intra_pred -0.272, entropy +0.265, deadzone +0.256
 - gen 1 shard 9 (fit 3.37): refresh +0.085
 - gen 18 shard 9 (fit 1.07): deblock +0.103
+
+## Merge run 54
+
+- gen 24 shard 2 (fit 2.181): adaptq -0.173
+- gen 25 shard 2 (fit 4.377): adaptq -0.144
+- gen 26 shard 2 (fit 3.542): adaptq -0.134
+- gen 0 shard 3 (fit 3.581): deblock +0.277, dz_dc -0.261, intra_pred -0.255, deadzone +0.216, refresh +0.211
+- gen 10 shard 3 (fit 3.351): p_qmul +0.091
+- gen 18 shard 3 (fit 3.164): p_qmul +0.102
+- gen 20 shard 3 (fit 1.04): p_qmul +0.155
+- gen 24 shard 3 (fit 3.139): p_qmul +0.107
+- gen 26 shard 3 (fit 3.323): p_qmul +0.083
+- gen 0 shard 4 (fit 3.227): intra_pred -0.226, deadzone +0.223, deblock +0.218, dz_dc -0.217, refresh +0.199
+- gen 0 shard 5 (fit 2.692): deblock +0.229, entropy +0.202, dz_dc -0.197, deadzone +0.19, intra_pred -0.189
+- gen 0 shard 6 (fit 3.227): deadzone +0.294, deblock +0.292, intra_pred -0.276, entropy +0.259, baseq +0.224
+- gen 25 shard 6 (fit 1.842): skip +0.08
+- gen 26 shard 6 (fit 2.586): skip +0.11
+- gen 27 shard 6 (fit 2.753): skip -0.105
+- gen 0 shard 7 (fit 4.014): dz_dc -0.253, refresh +0.242, deblock +0.229, deadzone +0.22, intra_pred -0.204
+- gen 0 shard 8 (fit 1.932): deblock +0.322, deadzone +0.299, entropy +0.293, intra_pred -0.289, dz_dc -0.274
+- gen 4 shard 8 (fit 3.122): skip +0.098
+- gen 10 shard 8 (fit 1.425): skip +0.111
+- gen 19 shard 8 (fit 5.056): p_qmul -0.103, cfl +0.091
+- gen 20 shard 8 (fit 3.764): cfl +0.137
+- gen 21 shard 8 (fit 4.458): cfl +0.102
+- gen 22 shard 8 (fit 3.468): p_qmul +0.102
+- gen 25 shard 8 (fit 2.936): adaptq +0.089
+- gen 0 shard 9 (fit 2.529): dz_dc -0.255, deblock +0.252, deadzone +0.248, refresh +0.225, entropy +0.221
+- gen 22 shard 9 (fit 2.511): intra_gop -0.091
+- gen 23 shard 9 (fit 2.524): intra_gop -0.096
+- gen 25 shard 9 (fit 4.802): intra_gop -0.122
+- gen 26 shard 9 (fit 1.979): intra_gop -0.099
