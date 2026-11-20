@@ -4597,3 +4597,24 @@ rewards blur; MS-SSIM re-steepens the gradient where the arena was stuck.
 - gen 27 shard 8 (fit 3.636): intra_pred -0.085
 - gen 0 shard 9 (fit 2.906): keyint -0.219, intra_pred -0.198, dz_dc -0.197, entropy +0.188, refresh +0.181
 - gen 12 shard 9 (fit 4.648): entropy -0.085
+
+## Merge run 57
+
+- gen 0 shard 3 (fit 4.13): deadzone +0.249, intra_pred -0.221, deblock +0.22, dz_dc -0.214, baseq +0.207
+- gen 17 shard 3 (fit 2.018): entropy +0.081
+- gen 0 shard 4 (fit 4.266): deadzone +0.24, deblock +0.219, dz_dc -0.215, baseq +0.201, intra_pred -0.196
+- gen 14 shard 4 (fit 4.778): p_qmul -0.118
+- gen 0 shard 5 (fit 2.862): deblock +0.343, deadzone +0.332, dz_dc -0.327, refresh +0.299, entropy +0.286
+- gen 6 shard 5 (fit 3.475): p_qmul +0.136
+- gen 19 shard 5 (fit 3.541): search -0.081
+- gen 20 shard 5 (fit 4.336): search +0.1
+- gen 0 shard 6 (fit 4.926): intra_pred -0.348, deblock +0.33, entropy +0.301, dz_dc -0.281, deadzone +0.279
+- gen 1 shard 6 (fit 4.52): refresh +0.1
+- gen 3 shard 6 (fit 3.645): skip +0.081
+- gen 0 shard 7 (fit 4.455): intra_pred -0.21, baseq +0.186, deblock +0.186, entropy +0.172, deadzone +0.163
+- gen 10 shard 7 (fit 3.006): p_qmul +0.095
+- gen 0 shard 8 (fit 5.422): deadzone +0.284, entropy +0.28, baseq +0.274, deblock +0.272, dz_dc -0.259
+- gen 1 shard 8 (fit 4.936): deblock +0.098, refresh +0.083, dz_dc -0.081
+- gen 6 shard 8 (fit 1.857): p_qmul +0.09
+- gen 0 shard 9 (fit 2.784): deblock +0.283, dz_dc -0.267, intra_pred -0.254, deadzone +0.25, refresh +0.248
+- gen 8 shard 9 (fit 3.384): p_qmul +0.087
