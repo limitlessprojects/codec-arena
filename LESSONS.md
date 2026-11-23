@@ -4639,3 +4639,38 @@ rewards blur; MS-SSIM re-steepens the gradient where the arena was stuck.
 - gen 0 shard 8 (fit 4.928): intra_pred -0.226, dz_dc -0.223, deblock +0.223, deadzone +0.212, refresh +0.197
 - gen 0 shard 9 (fit 4.682): deblock +0.242, dz_dc -0.224, intra_pred -0.202, deadzone +0.191, refresh +0.187
 - gen 25 shard 9 (fit 4.705): entropy +0.106
+
+## Merge run 59
+
+- gen 0 shard 3 (fit 3.493): deblock +0.37, dz_dc -0.336, intra_pred -0.319, refresh +0.302, deadzone +0.3
+- gen 2 shard 3 (fit 2.92): q_low +0.091
+- gen 3 shard 3 (fit 3.355): q_low +0.105
+- gen 4 shard 3 (fit 4.905): q_low -0.088
+- gen 6 shard 3 (fit 3.488): p_qmul +0.097
+- gen 11 shard 3 (fit 1.879): q_low +0.095
+- gen 0 shard 4 (fit 3.842): deblock +0.224, deadzone +0.223, chroma_q +0.207, baseq +0.194, refresh +0.194
+- gen 2 shard 4 (fit 2.756): skip +0.143
+- gen 3 shard 4 (fit 4.143): skip +0.191
+- gen 4 shard 4 (fit 3.205): skip +0.088
+- gen 5 shard 4 (fit 3.77): skip -0.173
+- gen 6 shard 4 (fit 3.804): skip -0.191, chroma_q -0.091
+- gen 7 shard 4 (fit 2.472): skip +0.236
+- gen 8 shard 4 (fit 5.176): skip -0.167
+- gen 21 shard 4 (fit 1.858): chroma_q +0.081
+- gen 23 shard 4 (fit 5.427): search -0.086
+- gen 0 shard 5 (fit 4.109): intra_pred -0.247, entropy +0.246, deblock +0.221, keyint -0.206, baseq +0.203
+- gen 15 shard 5 (fit 4.98): halfpel -0.08
+- gen 24 shard 5 (fit 4.342): halfpel -0.137
+- gen 0 shard 6 (fit 3.858): intra_pred -0.244, keyint -0.213, deblock +0.197, entropy +0.186, baseq +0.175
+- gen 4 shard 6 (fit 3.444): skip +0.1
+- gen 10 shard 6 (fit 3.004): p_qmul +0.126
+- gen 19 shard 6 (fit 2.996): p_qmul +0.095
+- gen 0 shard 7 (fit 2.904): keyint -0.236, baseq +0.231, dz_dc -0.223, deadzone +0.217, deblock +0.216
+- gen 17 shard 7 (fit 4.655): deblock -0.088
+- gen 26 shard 7 (fit 4.794): intra_pred +0.09
+- gen 0 shard 8 (fit 2.9): keyint -0.218, dz_dc -0.213, deadzone +0.21, entropy +0.189, baseq +0.188
+- gen 0 shard 9 (fit 4.766): deadzone +0.216, baseq +0.196, keyint -0.191, deblock +0.182, intra_pred -0.158
+- gen 5 shard 9 (fit 1.875): skip +0.106
+- gen 6 shard 9 (fit 5.513): skip -0.131
+- gen 8 shard 9 (fit 1.854): intra_gop -0.106, q_low +0.081
+- gen 10 shard 9 (fit 3.265): intra_gop -0.097
