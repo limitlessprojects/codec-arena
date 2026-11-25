@@ -4707,3 +4707,35 @@ rewards blur; MS-SSIM re-steepens the gradient where the arena was stuck.
 - gen 1 shard 9 (fit 3.338): skip +0.095
 - gen 3 shard 9 (fit 1.628): skip +0.082
 - gen 15 shard 9 (fit 3.274): p_qmul +0.088
+
+## Merge run 61
+
+- gen 0 shard 3 (fit 4.949): deblock +0.343, dz_dc -0.309, intra_pred -0.309, refresh +0.302, baseq +0.291
+- gen 1 shard 3 (fit 5.091): dz_dc -0.104, deblock +0.104, intra_pred -0.09, refresh +0.081
+- gen 3 shard 3 (fit 2.012): q_low +0.134
+- gen 5 shard 3 (fit 2.997): q_low +0.206
+- gen 17 shard 3 (fit 4.142): intra_gop -0.097
+- gen 0 shard 4 (fit 2.455): deblock +0.248, intra_pred -0.232, keyint -0.223, baseq +0.213, deadzone +0.212
+- gen 12 shard 4 (fit 3.701): skip +0.165
+- gen 13 shard 4 (fit 3.55): skip +0.157
+- gen 14 shard 4 (fit 4.051): skip -0.2
+- gen 15 shard 4 (fit 4.165): skip -0.094
+- gen 0 shard 5 (fit 3.301): intra_pred -0.265, entropy +0.262, deblock +0.255, deadzone +0.246, dz_dc -0.245
+- gen 16 shard 5 (fit 2.389): q_low +0.158, intra_b0 -0.099
+- gen 18 shard 5 (fit 1.983): q_low +0.171
+- gen 0 shard 6 (fit 3.229): dz_dc -0.216, entropy +0.213, deblock +0.21, deadzone +0.189, intra_pred -0.184
+- gen 2 shard 6 (fit 3.432): skip +0.083
+- gen 3 shard 6 (fit 3.309): skip +0.176
+- gen 4 shard 6 (fit 3.468): skip +0.137
+- gen 5 shard 6 (fit 1.962): skip -0.162, p_qmul +0.085
+- gen 6 shard 6 (fit 3.315): skip -0.104
+- gen 11 shard 6 (fit 2.566): p_qmul +0.112
+- gen 0 shard 7 (fit 3.645): intra_pred -0.306, deblock +0.289, entropy +0.267, deadzone +0.266, baseq +0.226
+- gen 10 shard 7 (fit 3.707): intra_pred +0.086
+- gen 0 shard 8 (fit 4.573): keyint -0.213, intra_pred -0.206, deblock +0.192, baseq +0.175, entropy +0.173
+- gen 11 shard 8 (fit 1.424): p_qmul +0.083
+- gen 0 shard 9 (fit 5.194): deblock +0.229, intra_pred -0.208, dz_dc -0.204, entropy +0.202, refresh +0.199
+- gen 2 shard 9 (fit 2.685): skip +0.126
+- gen 3 shard 9 (fit 3.174): skip -0.107
+- gen 4 shard 9 (fit 3.195): skip +0.132
+- gen 5 shard 9 (fit 5.019): skip -0.116
