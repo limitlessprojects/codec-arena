@@ -4674,3 +4674,36 @@ rewards blur; MS-SSIM re-steepens the gradient where the arena was stuck.
 - gen 6 shard 9 (fit 5.513): skip -0.131
 - gen 8 shard 9 (fit 1.854): intra_gop -0.106, q_low +0.081
 - gen 10 shard 9 (fit 3.265): intra_gop -0.097
+
+## Merge run 60
+
+- gen 25 shard 2 (fit 4.926): cdef -0.08
+- gen 0 shard 3 (fit 4.198): deblock +0.293, dz_dc -0.291, refresh +0.258, deadzone +0.25, entropy +0.24
+- gen 11 shard 3 (fit 2.579): search -0.085
+- gen 21 shard 3 (fit 1.08): p_qmul +0.133
+- gen 0 shard 4 (fit 4.854): deblock +0.327, dz_dc -0.307, intra_pred -0.276, deadzone +0.274, refresh +0.267
+- gen 1 shard 4 (fit 2.833): refresh +0.104, dz_dc -0.103, deblock +0.094, intra_pred -0.087
+- gen 9 shard 4 (fit 0.936): q_low +0.083
+- gen 0 shard 5 (fit 4.966): baseq +0.323, deblock +0.32, entropy +0.306, keyint -0.305, refresh +0.267
+- gen 5 shard 5 (fit 1.025): q_low +0.119
+- gen 6 shard 5 (fit 2.586): skip +0.101
+- gen 7 shard 5 (fit 3.283): skip +0.113
+- gen 8 shard 5 (fit 4.206): skip -0.088
+- gen 0 shard 6 (fit 3.51): deblock +0.42, dz_dc -0.373, intra_pred -0.362, refresh +0.338, deadzone +0.327
+- gen 1 shard 6 (fit 4.633): refresh +0.122, deblock +0.122, dz_dc -0.098, intra_pred -0.097, deadzone +0.088
+- gen 22 shard 6 (fit 3.204): skip +0.085
+- gen 23 shard 6 (fit 2.835): skip -0.101
+- gen 0 shard 7 (fit 2.457): deblock +0.276, deadzone +0.265, dz_dc -0.246, refresh +0.244, intra_pred -0.225
+- gen 17 shard 7 (fit 1.445): cfl +0.088
+- gen 24 shard 7 (fit 1.9): cfl -0.106
+- gen 0 shard 8 (fit 2.575): deadzone +0.271, deblock +0.268, dz_dc -0.256, intra_pred -0.255, entropy +0.245
+- gen 2 shard 8 (fit 3.477): intra_b0 -0.09
+- gen 6 shard 8 (fit 2.064): gop_q -0.1
+- gen 8 shard 8 (fit 2.119): gop_q -0.1
+- gen 14 shard 8 (fit 4.827): search -0.085
+- gen 20 shard 8 (fit 0.977): p_qmul +0.082
+- gen 21 shard 8 (fit 2.602): deblock -0.084
+- gen 0 shard 9 (fit 3.316): dz_dc -0.244, deblock +0.234, refresh +0.218, entropy +0.215, deadzone +0.204
+- gen 1 shard 9 (fit 3.338): skip +0.095
+- gen 3 shard 9 (fit 1.628): skip +0.082
+- gen 15 shard 9 (fit 3.274): p_qmul +0.088
